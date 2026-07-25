@@ -1,0 +1,71 @@
+# Example gateway configuration. Copy to config.yaml and adjust.
+# Secrets (JWT/API-key/signing keys) are never stored here directly -- they
+# are referenced by env var name and read from the environment at startup.
+# See .env.example for the corresponding env vars.
+
+server:
+  addr: ":8080"
+  read_timeout: 5s
+  write_timeout: 10s
+  idle_timeout: 120s
+  read_header_timeout: 5s
+  shutdown_timeout: 30s
+
+upstreams:
+  - name: users-api
+    url: "http://users-api.internal:8081"
+    dial_timeout: 2s
+    request_timeout: 5s
+    circuit_breaker:
+      enabled: true
+      failure_threshold: 5
+      half_open_probe_after: 30s
+      half_open_max_requests: 1
+    retry:
+      enabled: true
+      max_attempts: 3
+      base_backoff: 100ms
+      max_backoff: 2s
+      idempotent_only: true
+
+  - name: orders-api
+    url: "http://orders-api.internal:8082"
+    dial_timeout: 2s
+    request_timeout: 8s
+    circuit_breaker:
+      enabled: true
+      failure_threshold: 5
+      half_open_probe_after: 30s
+      half_open_max_requests: 1
+    retry:
+      enabled: false
+
+routes:
+  - path_prefix: "/api/users"
+    upstream: users-api
+    auth:
+      enabled: true
+      mode: jwt
+      jwt_secret_env: JWT_SECRET
+    rate_limit:
+      enabled: true
+      requests_per_second: 50
+      burst: 100
+      key_strategy: api_key
+
+  - path_prefix: "/api/orders"
+    upstream: orders-api
+    auth:
+      enabled: true
+      mode: api_key
+      api_keys_env: ORDERS_API_KEYS
+    rate_limit:
+      enabled: true
+      requests_per_second: 20
+      burst: 40
+      key_strategy: api_key_ip
+    signing:
+      enabled: true
+      secret_env: ORDERS_SIGNING_SECRET
+      header_name: X-Signature
+      tolerance_seconds: 300
