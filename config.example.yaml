@@ -1,8 +1,3 @@
-# Example gateway configuration. Copy to config.yaml and adjust.
-# Secrets (JWT/API-key/signing keys) are never stored here directly -- they
-# are referenced by env var name and read from the environment at startup.
-# See .env.example for the corresponding env vars.
-
 server:
   addr: ":8080"
   read_timeout: 5s
