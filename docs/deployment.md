@@ -60,9 +60,11 @@ kubectl apply -f deploy/k8s/gateway.yaml
 
 ## Rolling deploys
 
-Graceful shutdown (above) plus a readiness probe that fails fast on a
-genuinely broken instance is what makes rolling deploys safe: Kubernetes
-won't route new traffic to a pod until `/readyz` passes, and won't kill a
+Graceful shutdown (above) plus the readiness probe is what makes rolling
+deploys safe: Kubernetes won't route new traffic to a pod until `/readyz`
+passes (it fails only while the process can't serve HTTP at all, never
+because an upstream is down; see
+[`docs/observability.md`](observability.md)), and won't kill a
 pod's connections until it's had `shutdown_timeout` to drain. If you
 increase `replicas` or add upstreams, re-run the load test in
 [`docs/observability.md`](observability.md#load-testing-baseline) — new

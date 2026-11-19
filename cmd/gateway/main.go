@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/swayam5342/jgateway/internal/config"
 	"github.com/swayam5342/jgateway/internal/health"
 	"github.com/swayam5342/jgateway/internal/middleware/auth"
+	"github.com/swayam5342/jgateway/internal/middleware/bodylimit"
 	"github.com/swayam5342/jgateway/internal/middleware/circuitbreaker"
 	"github.com/swayam5342/jgateway/internal/middleware/logging"
 	"github.com/swayam5342/jgateway/internal/middleware/metrics"
@@ -27,6 +29,7 @@ import (
 	"github.com/swayam5342/jgateway/internal/middleware/recovery"
 	"github.com/swayam5342/jgateway/internal/middleware/retry"
 	"github.com/swayam5342/jgateway/internal/middleware/signing"
+	"github.com/swayam5342/jgateway/internal/middleware/timeout"
 	"github.com/swayam5342/jgateway/internal/proxy"
 	pkgmw "github.com/swayam5342/jgateway/pkg/middleware"
 )
@@ -53,55 +56,9 @@ func main() {
 }
 
 func run(cfg *config.Config, logger *slog.Logger) error {
-	upstreams := make(map[string]*proxy.Upstream, len(cfg.Upstreams))
-	for _, u := range cfg.Upstreams {
-		up, err := proxy.NewUpstream(u.Name, u.URL, u.DialTimeout, u.RequestTimeout)
-		if err != nil {
-			return err
-		}
-		upstreams[u.Name] = up
-	}
-
-	healthHandler := health.NewHandler()
-	for _, u := range cfg.Upstreams {
-		target := u.URL
-		healthHandler.Register(u.Name, readinessCheck(target))
-	}
-
-	routes := make([]proxy.Route, 0, len(cfg.Routes))
-	for _, routeCfg := range cfg.Routes {
-		up, ok := upstreams[routeCfg.Upstream]
-		if !ok {
-			return errNoSuchUpstream(routeCfg.Upstream)
-		}
-
-		var upCfg config.Upstream
-		for _, u := range cfg.Upstreams {
-			if u.Name == routeCfg.Upstream {
-				upCfg = u
-				break
-			}
-		}
-
-		handler := buildRouteHandler(logger, routeCfg, upCfg, up)
-		routes = append(routes, proxy.Route{PathPrefix: routeCfg.PathPrefix, Handler: handler})
-	}
-
-	router := proxy.NewRouter(routes)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthHandler.Liveness)
-	mux.HandleFunc("/readyz", healthHandler.Readiness)
-	mux.Handle("/metrics", metrics.Handler())
-	mux.Handle("/", pkgmw.Chain(router, recovery.New(logger)))
-
-	server := &http.Server{
-		Addr:              cfg.Server.Addr,
-		Handler:           mux,
-		ReadTimeout:       cfg.Server.ReadTimeout,
-		WriteTimeout:      cfg.Server.WriteTimeout,
-		IdleTimeout:       cfg.Server.IdleTimeout,
-		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+	server, err := newServer(cfg, logger)
+	if err != nil {
+		return err
 	}
 
 	serverErrCh := make(chan error, 1)
@@ -134,13 +91,75 @@ func run(cfg *config.Config, logger *slog.Logger) error {
 	return nil
 }
 
+// newServer builds the fully wired *http.Server (routes, middleware chains,
+// health and metrics endpoints, timeouts) from a validated config, without
+// starting it.
+func newServer(cfg *config.Config, logger *slog.Logger) (*http.Server, error) {
+	upstreams := make(map[string]*proxy.Upstream, len(cfg.Upstreams))
+	upstreamCfgs := make(map[string]config.Upstream, len(cfg.Upstreams))
+	for _, u := range cfg.Upstreams {
+		up, err := proxy.NewUpstream(u.Name, u.URL, u.DialTimeout, u.RequestTimeout)
+		if err != nil {
+			return nil, err
+		}
+		upstreams[u.Name] = up
+		upstreamCfgs[u.Name] = u
+	}
+
+	healthHandler := health.NewHandler(2 * time.Second)
+	for _, u := range cfg.Upstreams {
+		healthHandler.Register(u.Name, readinessCheck(u.URL))
+	}
+
+	routes := make([]proxy.Route, 0, len(cfg.Routes))
+	for _, routeCfg := range cfg.Routes {
+		up, ok := upstreams[routeCfg.Upstream]
+		if !ok {
+			return nil, errNoSuchUpstream(routeCfg.Upstream)
+		}
+		handler, err := buildRouteHandler(logger, cfg.Server, routeCfg, upstreamCfgs[routeCfg.Upstream], up)
+		if err != nil {
+			return nil, err
+		}
+		routes = append(routes, proxy.Route{PathPrefix: routeCfg.PathPrefix, Handler: handler})
+	}
+
+	router := proxy.NewRouter(routes)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", healthHandler.Liveness)
+	mux.HandleFunc("/readyz", healthHandler.Readiness)
+	mux.Handle("/metrics", metrics.Handler())
+	// Gateway-wide middleware, outermost first: recovery catches panics
+	// from everything below; timeout puts the overall deadline on the
+	// context before anything else runs; bodylimit caps bodies before any
+	// route middleware (signing, retry) buffers them.
+	mux.Handle("/", pkgmw.Chain(router,
+		recovery.New(logger),
+		timeout.New(timeout.Config{
+			RequestTimeout: cfg.Server.RequestTimeout,
+			UpgradeTimeout: cfg.Server.UpgradeTimeout,
+		}),
+		bodylimit.New(cfg.Server.MaxBodyBytes),
+	))
+
+	return &http.Server{
+		Addr:              cfg.Server.Addr,
+		Handler:           mux,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+	}, nil
+}
+
 // buildRouteHandler composes the middleware chain for a single route. Order
 // is deliberate and documented per AGENTS.md: logging/metrics wrap
 // everything for full observability, auth runs before rate limiting so
 // limiter keys can use the authenticated identity, signing verifies the
 // payload before it's retried/forwarded, and the circuit breaker sits
 // innermost so it trips on real upstream failures only.
-func buildRouteHandler(logger *slog.Logger, routeCfg config.Route, upCfg config.Upstream, up *proxy.Upstream) http.Handler {
+func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg config.Route, upCfg config.Upstream, up *proxy.Upstream) (http.Handler, error) {
 	reverseProxy := proxy.NewReverseProxy(up)
 
 	var mws []pkgmw.Middleware
@@ -150,8 +169,21 @@ func buildRouteHandler(logger *slog.Logger, routeCfg config.Route, upCfg config.
 	if routeCfg.Auth.Enabled {
 		switch routeCfg.Auth.Mode {
 		case "jwt":
-			secret := []byte(os.Getenv(routeCfg.Auth.JWTSecretEnv))
-			mws = append(mws, auth.NewJWT(auth.JWTConfig{Secret: secret}))
+			jwtCfg := auth.JWTConfig{
+				Issuer:   routeCfg.Auth.Issuer,
+				Audience: routeCfg.Auth.Audience,
+				Leeway:   routeCfg.Auth.Leeway,
+			}
+			if routeCfg.Auth.JWTSecretEnv != "" {
+				jwtCfg.Secret = []byte(os.Getenv(routeCfg.Auth.JWTSecretEnv))
+			} else {
+				jwtCfg.PublicKeyPEM = []byte(os.Getenv(routeCfg.Auth.JWTPublicKeyEnv))
+			}
+			mw, err := auth.NewJWT(jwtCfg)
+			if err != nil {
+				return nil, fmt.Errorf("route %q: %w", routeCfg.PathPrefix, err)
+			}
+			mws = append(mws, mw)
 		case "api_key":
 			keys := splitNonEmpty(os.Getenv(routeCfg.Auth.APIKeysEnv), ",")
 			mws = append(mws, auth.NewAPIKey(auth.APIKeyConfig{ValidKeys: keys}))
@@ -159,10 +191,16 @@ func buildRouteHandler(logger *slog.Logger, routeCfg config.Route, upCfg config.
 	}
 
 	if routeCfg.RateLimit.Enabled {
+		// Validated by config.Validate, so this can't fail here.
+		trusted, err := config.ParseTrustedProxies(srv.TrustedProxies)
+		if err != nil {
+			return nil, err
+		}
 		mws = append(mws, ratelimit.New(ratelimit.Config{
 			RequestsPerSecond: routeCfg.RateLimit.RequestsPerSecond,
 			Burst:             routeCfg.RateLimit.Burst,
 			Strategy:          ratelimit.KeyStrategy(routeCfg.RateLimit.KeyStrategy),
+			TrustedProxies:    trusted,
 		}, ratelimit.NewMemoryStore()))
 	}
 
@@ -192,9 +230,11 @@ func buildRouteHandler(logger *slog.Logger, routeCfg config.Route, upCfg config.
 		mws = append(mws, circuitbreaker.Middleware(br))
 	}
 
-	return pkgmw.Chain(reverseProxy, mws...)
+	return pkgmw.Chain(reverseProxy, mws...), nil
 }
 
+// readinessCheck reports whether a TCP connection to the upstream can be
+// opened. Used for the informational upstream status in /readyz only.
 func readinessCheck(rawURL string) health.Checker {
 	// Upstream URLs are validated at config load time (config.Validate), so
 	// a parse failure here can't happen in practice.
@@ -207,8 +247,9 @@ func readinessCheck(rawURL string) health.Checker {
 		}
 		host = net.JoinHostPort(target.Hostname(), port)
 	}
-	return func() error {
-		conn, err := net.DialTimeout("tcp", host, 2*time.Second)
+	return func(ctx context.Context) error {
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, "tcp", host)
 		if err != nil {
 			return err
 		}

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/swayam5342/jgateway/internal/middleware/bodylimit"
 	"github.com/swayam5342/jgateway/pkg/middleware"
 )
 
@@ -75,7 +76,7 @@ func New(cfg Config) middleware.Middleware {
 			if r.Body != nil {
 				body, err = io.ReadAll(r.Body)
 				if err != nil {
-					http.Error(w, "error reading body", http.StatusBadRequest)
+					bodylimit.WriteReadError(w, err)
 					return
 				}
 				r.Body = io.NopCloser(bytes.NewReader(body))

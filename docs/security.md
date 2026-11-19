@@ -13,9 +13,15 @@ unrecognized key. There is no code path where a validation error results in
 the request being let through. If you add a new auth mode, preserve this:
 an `if err != nil { return }` before the success path, never the inverse.
 
-- **JWT**: only `HS256`/`HS384`/`HS512` are accepted
-  (`jwt.WithValidMethods`), which also blocks the classic
-  "alg: none" / algorithm-confusion attack against `jwt.Parse`'s keyfunc.
+- **JWT**: the accepted algorithms are pinned to the configured key's
+  type (`jwt.WithValidMethods`): a shared secret allows only
+  `HS256`/`HS384`/`HS512`; an RSA public key only `RS*`/`PS*`; ECDSA only
+  `ES*`; Ed25519 only `EdDSA`. This blocks "alg: none" and the classic
+  RS256→HS256 confusion attack (HMAC-signing a token with the public key as
+  the secret). Tokens must also carry an unexpired `exp` (a token without
+  one would never expire) and a non-empty `sub`, and must match
+  `auth.issuer` / `auth.audience` when those are configured. A key that
+  fails to parse stops the gateway at startup.
 - **API key**: compared with `crypto/subtle.ConstantTimeCompare`, not `==`,
   so response timing can't be used to binary-search a valid key
   byte-by-byte.
@@ -47,11 +53,17 @@ is attacker-controlled unless something trustworthy sets it.
 - `api_key` / `api_key_ip` key on the identity the auth middleware attached
   to the request context — spoofing this means having a valid credential,
   which is a much smaller attack surface.
-- `ip` reads `X-Forwarded-For` **only if** `TrustForwardedFor` is explicitly
-  set, and even then takes only the leftmost entry (the convention for
-  "closest-to-client" when the LB itself appends). If you're not certain
-  your load balancer overwrites (not appends to) that header, do not set
-  `TrustForwardedFor: true` — it becomes a free rate-limit bypass.
+- `ip` uses `ratelimit.ClientIP`. If the direct peer is **not** listed in
+  `server.trusted_proxies`, the peer address is the client and
+  `X-Forwarded-For` is ignored entirely. If it is, `X-Forwarded-For` is
+  read **from the right**, the end trusted proxies append to, skipping
+  trusted hops; the first untrusted address is the client. Entries to the
+  left of that were written by the client and are never used, so
+  prepending fake addresses doesn't buy a fresh bucket. (Taking the
+  *leftmost* entry, a common mistake, is a free rate-limit bypass.)
+- Behind a load balancer, list its address range in
+  `server.trusted_proxies`. Otherwise every request appears to come from
+  the LB and all clients share one bucket.
 - If the configured strategy can't resolve a key (e.g. `api_key_ip` with no
   authenticated identity), the request is rejected with `429` rather than
   falling through unbucketed — fail closed, same principle as auth.
@@ -59,6 +71,15 @@ is attacker-controlled unless something trustworthy sets it.
 **Recommendation:** default to `api_key` or `api_key_ip` on any route with
 auth enabled. Reserve `ip` for genuinely anonymous routes sitting behind a
 load balancer you control.
+
+## Request body size
+
+`server.max_body_bytes` (default 10 MiB) is enforced by
+`internal/middleware/bodylimit`, outside every route chain: requests
+declaring a larger `Content-Length` get `413` immediately, and chunked
+bodies fail with `413` once they cross the limit. Signing verification and
+retry both read the whole body into memory, so without this cap a handful
+of large uploads could exhaust the pod's memory.
 
 ## Secrets
 

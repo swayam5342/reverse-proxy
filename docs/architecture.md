@@ -71,7 +71,12 @@ Every middleware:
 
 1. Request hits the top-level `http.ServeMux` in `cmd/gateway/main.go`.
    `/healthz`, `/readyz`, and `/metrics` are handled directly; everything
-   else goes to the `Router`, wrapped once in `recovery.New`.
+   else goes to the `Router`, wrapped once in the gateway-wide chain
+   `recovery → timeout → bodylimit`: panic recovery outermost; then the
+   overall request deadline (`server.request_timeout`, or
+   `server.upgrade_timeout` for WebSocket upgrades) so every later
+   middleware and the upstream call share it; then the body-size cap, so
+   nothing downstream can buffer an unbounded body.
 2. `Router.ServeHTTP` finds the longest matching `PathPrefix` and dispatches
    to that route's pre-built handler chain, or 404s
    (`proxy.ErrNoRouteMatch`) if nothing matches.
@@ -90,6 +95,10 @@ Every middleware:
      authenticated identity, not just IP.
    - **signing after auth** — verifies the payload itself once we already
      know who's calling.
+   - **retry** streams responses: it only holds back retryable error
+     responses (502/503/504, body capped at 64 KiB), so successful and
+     streaming responses pass straight through. Upgrade requests are never
+     retried.
    - **retry before circuit breaker** — a retried request that eventually
      succeeds shouldn't count as a breaker failure on every attempt; the
      breaker sees only the outcome retry settles on.

@@ -128,7 +128,7 @@ upstreams:
   - name: users-api
     url: "http://users-api.internal:8081"
     dial_timeout: 2s
-    request_timeout: 5s
+    request_timeout: 2s
     circuit_breaker:
       enabled: true
       failure_threshold: 5

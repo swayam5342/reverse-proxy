@@ -26,7 +26,7 @@ func TestJWT_ValidToken(t *testing.T) {
 		t.Fatalf("signing token: %v", err)
 	}
 
-	h := NewJWT(JWTConfig{Secret: secret})(okHandler())
+	h := mustJWT(t, JWTConfig{Secret: secret})(okHandler())
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+signed)
 	rec := httptest.NewRecorder()
@@ -60,7 +60,7 @@ func TestJWT_FailsClosed(t *testing.T) {
 		{"garbage token", "Bearer garbage.garbage.garbage"},
 	}
 
-	h := NewJWT(JWTConfig{Secret: secret})(okHandler())
+	h := mustJWT(t, JWTConfig{Secret: secret})(okHandler())
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)

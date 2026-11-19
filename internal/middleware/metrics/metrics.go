@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/swayam5342/jgateway/internal/middleware/statusrec"
 	"github.com/swayam5342/jgateway/pkg/middleware"
 )
 
@@ -62,27 +63,17 @@ func Handler() http.Handler {
 	return promhttp.Handler()
 }
 
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
 // New returns a middleware that records request count and latency for
 // route against RequestsTotal/RequestDuration.
 func New(route string) middleware.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
-			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			rec := statusrec.New(w)
 
 			next.ServeHTTP(rec, r)
 
-			status := strconv.Itoa(rec.status)
+			status := strconv.Itoa(rec.Status())
 			RequestsTotal.WithLabelValues(route, r.Method, status).Inc()
 			RequestDuration.WithLabelValues(route, status).Observe(time.Since(start).Seconds())
 		})

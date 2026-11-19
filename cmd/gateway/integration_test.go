@@ -46,7 +46,10 @@ func TestIntegration_AuthRejectsBadToken(t *testing.T) {
 			JWTSecretEnv: "JWT_SECRET",
 		},
 	}
-	handler := buildRouteHandler(testLogger(), routeCfg, config.Upstream{Name: "backend"}, up)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up)
+	if err != nil {
+		t.Fatalf("buildRouteHandler: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/thing", nil)
 	rec := httptest.NewRecorder()
@@ -60,7 +63,7 @@ func TestIntegration_AuthRejectsBadToken(t *testing.T) {
 	}
 
 	// A validly signed token should pass through to the upstream.
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{Subject: "user-1"})
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{Subject: "user-1", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
 	signed, err := token.SignedString([]byte(secret))
 	if err != nil {
 		t.Fatalf("signing token: %v", err)
@@ -102,7 +105,10 @@ func TestIntegration_RateLimiterReturns429AfterN(t *testing.T) {
 			KeyStrategy:       "ip",
 		},
 	}
-	handler := buildRouteHandler(testLogger(), routeCfg, config.Upstream{Name: "backend"}, up)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up)
+	if err != nil {
+		t.Fatalf("buildRouteHandler: %v", err)
+	}
 
 	newReq := func() *http.Request {
 		r := httptest.NewRequest(http.MethodGet, "/api/thing", nil)
@@ -148,7 +154,10 @@ func TestIntegration_CircuitBreakerOpensAfterFailures(t *testing.T) {
 		},
 	}
 	routeCfg := config.Route{PathPrefix: "/api", Upstream: "backend"}
-	handler := buildRouteHandler(testLogger(), routeCfg, upCfg, up)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, upCfg, up)
+	if err != nil {
+		t.Fatalf("buildRouteHandler: %v", err)
+	}
 
 	for i := range 2 {
 		rec := httptest.NewRecorder()

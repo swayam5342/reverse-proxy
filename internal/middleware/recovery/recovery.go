@@ -22,6 +22,11 @@ func New(logger *slog.Logger) middleware.Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if rec := recover(); rec != nil {
+					if rec == http.ErrAbortHandler {
+						// Deliberate mid-response abort (e.g. upstream body
+						// copy failed); let net/http close the connection.
+						panic(rec)
+					}
 					logger.Error("panic recovered",
 						"panic", rec,
 						"path", r.URL.Path,

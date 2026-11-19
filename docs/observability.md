@@ -44,11 +44,16 @@ Two separate endpoints, deliberately not conflated
   all. Never depends on upstream state. An orchestrator killing/restarting
   the gateway because one backend is unreachable would make an outage
   worse, not better — liveness must not reflect that.
-- **`/readyz`** (readiness) — `200` only if every registered upstream
-  readiness check passes (a TCP dial in `cmd/gateway/main.go`'s
-  `readinessCheck`); otherwise `503` with a JSON body naming which upstream
-  failed. Use this as the load balancer / k8s readiness probe so traffic
-  stops routing to an instance that can't currently reach its backends.
+- **`/readyz`** (readiness) — `200` whenever this gateway instance can
+  serve requests. Upstream reachability is reported in the JSON body
+  (`{"ready": true, "upstreams": {"users-api": "ok", "orders-api":
+  "dial tcp ...: connection refused"}}`) but deliberately does **not** fail
+  the probe. Every replica shares the same upstreams, so if one dead
+  backend made `/readyz` fail, the orchestrator would pull *every* gateway
+  pod out of rotation at once and take down routes to healthy backends
+  too. Isolating a dead backend is the circuit breaker's job. Checks are
+  TCP dials (`readinessCheck` in `cmd/gateway/main.go`), run concurrently
+  and bounded to 2s total.
 
 ## Tracing
 

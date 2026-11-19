@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/swayam5342/jgateway/internal/middleware/statusrec"
 	"github.com/swayam5342/jgateway/pkg/middleware"
 )
 
@@ -138,16 +139,6 @@ func (b *Breaker) recordResult(success bool) {
 	}
 }
 
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
 // Middleware wraps a handler with br. Requests are rejected with 503 while
 // the breaker is Open; a 5xx response counts as a failure, anything else
 // counts as a success.
@@ -159,10 +150,10 @@ func Middleware(br *Breaker) middleware.Middleware {
 				return
 			}
 
-			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			rec := statusrec.New(w)
 			next.ServeHTTP(rec, r)
 
-			br.recordResult(rec.status < http.StatusInternalServerError)
+			br.recordResult(rec.Status() < http.StatusInternalServerError)
 		})
 	}
 }

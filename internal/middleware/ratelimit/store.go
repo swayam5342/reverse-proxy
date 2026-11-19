@@ -16,19 +16,38 @@ type Store interface {
 	Allow(key string, rps float64, burst int, now time.Time) bool
 }
 
+// sweepInterval is how often MemoryStore drops buckets that have refilled.
+const sweepInterval = time.Minute
+
 // bucket is a token bucket: tokens replenish continuously at rps and cap at
-// burst capacity.
+// burst capacity. rps and burst are remembered so a sweep can tell when the
+// bucket has refilled.
 type bucket struct {
 	tokens     float64
 	lastRefill time.Time
+	rps        float64
+	burst      int
+}
+
+// full reports whether b would be at capacity if refilled at now, i.e. it
+// is indistinguishable from a freshly created bucket.
+func (b *bucket) full(now time.Time) bool {
+	return b.tokens+now.Sub(b.lastRefill).Seconds()*b.rps >= float64(b.burst)
 }
 
 // MemoryStore is an in-process Store keyed by string, guarded by a single
 // mutex. Fine for a single gateway instance; use a distributed Store when
 // running multiple replicas that must share a limit.
+//
+// Memory is bounded by the number of keys active within roughly one refill
+// period (burst/rps): at most once per sweepInterval, Allow drops every
+// bucket that has refilled to capacity. Dropping a full bucket is lossless,
+// since a missing key starts as a full bucket anyway. Sweeping inline
+// avoids a background goroutine that would need its own lifecycle.
 type MemoryStore struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
+	mu        sync.Mutex
+	buckets   map[string]*bucket
+	lastSweep time.Time
 }
 
 // NewMemoryStore returns an empty in-memory token bucket store.
@@ -43,11 +62,14 @@ func (s *MemoryStore) Allow(key string, rps float64, burst int, now time.Time) b
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.maybeSweepLocked(now)
+
 	b, ok := s.buckets[key]
 	if !ok {
 		b = &bucket{tokens: float64(burst), lastRefill: now}
 		s.buckets[key] = b
 	}
+	b.rps, b.burst = rps, burst
 
 	elapsed := now.Sub(b.lastRefill).Seconds()
 	if elapsed > 0 {
@@ -63,4 +85,29 @@ func (s *MemoryStore) Allow(key string, rps float64, burst int, now time.Time) b
 	}
 	b.tokens--
 	return true
+}
+
+// maybeSweepLocked drops refilled buckets if sweepInterval has elapsed
+// since the last sweep. Callers must hold s.mu.
+func (s *MemoryStore) maybeSweepLocked(now time.Time) {
+	if s.lastSweep.IsZero() {
+		s.lastSweep = now
+		return
+	}
+	if now.Sub(s.lastSweep) < sweepInterval {
+		return
+	}
+	s.lastSweep = now
+	for key, b := range s.buckets {
+		if b.full(now) {
+			delete(s.buckets, key)
+		}
+	}
+}
+
+// Len returns the number of buckets currently held.
+func (s *MemoryStore) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.buckets)
 }

@@ -6,9 +6,17 @@ package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/subtle"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
@@ -41,17 +49,59 @@ func NewContext(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, identityContextKey, id)
 }
 
-// JWTConfig configures bearer-token verification.
+// ErrInvalidJWTConfig is returned by NewJWT when the verification key is
+// missing, ambiguous, or unparseable.
+var ErrInvalidJWTConfig = errors.New("auth: invalid jwt config")
+
+// JWTConfig configures bearer-token verification. Exactly one of Secret or
+// PublicKeyPEM must be set. Both must come from an env var or secrets
+// manager — never hardcoded, never logged.
 type JWTConfig struct {
-	// Secret is the HMAC signing key. Must come from an env var or secrets
-	// manager — never hardcoded, never logged.
+	// Secret is a shared HMAC key; tokens must be HS256/HS384/HS512.
 	Secret []byte
+	// PublicKeyPEM is the issuer's public key ("PUBLIC KEY" or
+	// "RSA PUBLIC KEY") or X.509 certificate ("CERTIFICATE") in PEM form.
+	// The accepted algorithms follow from the key type: RSA → RS*/PS*,
+	// ECDSA → ES*, Ed25519 → EdDSA. This is what identity providers such as
+	// Auth0, Cognito, Keycloak and Google use.
+	PublicKeyPEM []byte
+	// Issuer, if set, must equal the token's "iss" claim.
+	Issuer string
+	// Audience, if set, must appear in the token's "aud" claim.
+	Audience string
+	// Leeway tolerates clock skew between the issuer and the gateway when
+	// checking exp/nbf/iat.
+	Leeway time.Duration
 }
 
 // NewJWT returns a middleware that verifies the Authorization: Bearer <jwt>
-// header using HMAC signature verification. Any missing header, malformed
-// token, bad signature, or expired token results in 401.
-func NewJWT(cfg JWTConfig) middleware.Middleware {
+// header. A token is accepted only if its signature verifies with the
+// configured key and an algorithm matching that key's type, it carries an
+// unexpired "exp" and a non-empty "sub", and (when configured) its issuer
+// and audience match. Anything else results in 401.
+//
+// NewJWT returns an error wrapping ErrInvalidJWTConfig if the key config is
+// unusable, so a misconfigured gateway fails at startup.
+func NewJWT(cfg JWTConfig) (middleware.Middleware, error) {
+	key, algs, err := verificationKey(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []jwt.ParserOption{
+		jwt.WithValidMethods(algs),
+		jwt.WithExpirationRequired(),
+		jwt.WithLeeway(cfg.Leeway),
+	}
+	if cfg.Issuer != "" {
+		opts = append(opts, jwt.WithIssuer(cfg.Issuer))
+	}
+	if cfg.Audience != "" {
+		opts = append(opts, jwt.WithAudience(cfg.Audience))
+	}
+	parser := jwt.NewParser(opts...)
+	keyFunc := func(*jwt.Token) (any, error) { return key, nil }
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authz := r.Header.Get("Authorization")
@@ -62,19 +112,17 @@ func NewJWT(cfg JWTConfig) middleware.Middleware {
 			}
 			raw := strings.TrimPrefix(authz, prefix)
 
-			token, err := jwt.Parse(raw, func(t *jwt.Token) (any, error) {
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, jwt.ErrTokenSignatureInvalid
-				}
-				return cfg.Secret, nil
-			}, jwt.WithValidMethods([]string{"HS256", "HS384", "HS512"}))
+			// WithValidMethods rejects any alg outside the key's family
+			// before keyFunc's key is used, which blocks alg:none and
+			// RS256→HS256 confusion.
+			token, err := parser.Parse(raw, keyFunc)
 			if err != nil || !token.Valid {
 				http.Error(w, "invalid token", http.StatusUnauthorized)
 				return
 			}
 
 			subject, err := token.Claims.GetSubject()
-			if err != nil {
+			if err != nil || subject == "" {
 				http.Error(w, "invalid token claims", http.StatusUnauthorized)
 				return
 			}
@@ -82,7 +130,63 @@ func NewJWT(cfg JWTConfig) middleware.Middleware {
 			ctx := context.WithValue(r.Context(), identityContextKey, Identity{Subject: subject, Method: "jwt"})
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}, nil
+}
+
+// verificationKey resolves cfg to the key handed to the JWT parser and the
+// algorithms allowed for it.
+func verificationKey(cfg JWTConfig) (any, []string, error) {
+	switch {
+	case len(cfg.Secret) > 0 && len(cfg.PublicKeyPEM) > 0:
+		return nil, nil, fmt.Errorf("%w: set either a secret or a public key, not both", ErrInvalidJWTConfig)
+	case len(cfg.Secret) > 0:
+		return cfg.Secret, []string{"HS256", "HS384", "HS512"}, nil
+	case len(cfg.PublicKeyPEM) > 0:
+		pub, err := parsePublicKeyPEM(cfg.PublicKeyPEM)
+		if err != nil {
+			return nil, nil, err
+		}
+		switch pub.(type) {
+		case *rsa.PublicKey:
+			return pub, []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"}, nil
+		case *ecdsa.PublicKey:
+			return pub, []string{"ES256", "ES384", "ES512"}, nil
+		case ed25519.PublicKey:
+			return pub, []string{"EdDSA"}, nil
+		default:
+			return nil, nil, fmt.Errorf("%w: unsupported public key type %T", ErrInvalidJWTConfig, pub)
+		}
+	default:
+		return nil, nil, fmt.Errorf("%w: no secret or public key configured", ErrInvalidJWTConfig)
 	}
+}
+
+func parsePublicKeyPEM(data []byte) (any, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("%w: public key is not valid PEM", ErrInvalidJWTConfig)
+	}
+	var (
+		pub any
+		err error
+	)
+	switch block.Type {
+	case "PUBLIC KEY":
+		pub, err = x509.ParsePKIXPublicKey(block.Bytes)
+	case "RSA PUBLIC KEY":
+		pub, err = x509.ParsePKCS1PublicKey(block.Bytes)
+	case "CERTIFICATE":
+		var cert *x509.Certificate
+		if cert, err = x509.ParseCertificate(block.Bytes); err == nil {
+			pub = cert.PublicKey
+		}
+	default:
+		return nil, fmt.Errorf("%w: unsupported PEM block %q (want PUBLIC KEY, RSA PUBLIC KEY or CERTIFICATE)", ErrInvalidJWTConfig, block.Type)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: parsing public key: %w", ErrInvalidJWTConfig, err)
+	}
+	return pub, nil
 }
 
 // APIKeyConfig configures API-key verification.

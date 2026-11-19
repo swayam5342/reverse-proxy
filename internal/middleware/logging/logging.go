@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/swayam5342/jgateway/internal/middleware/statusrec"
 	"github.com/swayam5342/jgateway/pkg/middleware"
 )
 
@@ -37,16 +38,6 @@ func newRequestID() string {
 	return hex.EncodeToString(b)
 }
 
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
 // New returns a middleware that assigns/propagates a request ID and logs one
 // structured line per request via logger (or slog.Default() if nil).
 // route names the route/upstream this handler serves, for log correlation.
@@ -65,7 +56,7 @@ func New(logger *slog.Logger, route string) middleware.Middleware {
 			ctx := context.WithValue(r.Context(), requestIDContextKey, requestID)
 			r = r.WithContext(ctx)
 
-			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			rec := statusrec.New(w)
 			start := time.Now()
 			next.ServeHTTP(rec, r)
 			latency := time.Since(start)
@@ -75,7 +66,7 @@ func New(logger *slog.Logger, route string) middleware.Middleware {
 				slog.String("route", route),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
-				slog.Int("status", rec.status),
+				slog.Int("status", rec.Status()),
 				slog.Duration("latency", latency),
 			)
 		})

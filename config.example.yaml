@@ -5,12 +5,25 @@ server:
   idle_timeout: 120s
   read_header_timeout: 5s
   shutdown_timeout: 30s
+  # Overall deadline per request, retries and backoff included. Must be
+  # shorter than write_timeout so the 504 can still be written, and at least
+  # every upstream request_timeout.
+  request_timeout: 9s
+  # Max lifetime of an upgraded (WebSocket) connection.
+  upgrade_timeout: 1h
+  # Request bodies above this get 413. 0 disables the limit.
+  max_body_bytes: 10485760 # 10 MiB
+  # CIDRs or IPs of the load balancers in front of the gateway.
+  # X-Forwarded-For is only honored when the direct peer is one of these.
+  # Leave empty if clients connect to the gateway directly.
+  trusted_proxies: []
+  #  - 10.0.0.0/8
 
 upstreams:
   - name: users-api
     url: "http://users-api.internal:8081"
     dial_timeout: 2s
-    request_timeout: 5s
+    request_timeout: 2s # x3 attempts + backoff fits within server.request_timeout
     circuit_breaker:
       enabled: true
       failure_threshold: 5
@@ -42,6 +55,12 @@ routes:
       enabled: true
       mode: jwt
       jwt_secret_env: JWT_SECRET
+      # Or, for an identity provider (Auth0, Cognito, Keycloak, ...), use
+      # its PEM public key or certificate instead of a shared secret:
+      # jwt_public_key_env: JWT_PUBLIC_KEY
+      # issuer: "https://your-tenant.example.com/"
+      # audience: "users-api"
+      # leeway: 30s
     rate_limit:
       enabled: true
       requests_per_second: 50
