@@ -48,7 +48,7 @@ func TestIntegration_AuthRejectsBadToken(t *testing.T) {
 			JWTSecretEnv: "JWT_SECRET",
 		},
 	}
-	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up, nil)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteHandler: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestIntegration_RateLimiterReturns429AfterN(t *testing.T) {
 			KeyStrategy:       "ip",
 		},
 	}
-	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up, nil)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteHandler: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestIntegration_CircuitBreakerOpensAfterFailures(t *testing.T) {
 		},
 	}
 	routeCfg := config.Route{PathPrefix: "/api", Upstream: "backend"}
-	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, upCfg, up, nil)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, upCfg, up, nil, newBreaker(upCfg))
 	if err != nil {
 		t.Fatalf("buildRouteHandler: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestIntegration_RateLimitRejectionMetricRecorded(t *testing.T) {
 		Upstream:   "backend",
 		RateLimit:  config.RateLimitConfig{Enabled: true, RequestsPerSecond: 0.001, Burst: 1, KeyStrategy: "ip"},
 	}
-	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up, nil)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteHandler: %v", err)
 	}

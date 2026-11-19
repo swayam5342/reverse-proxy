@@ -37,6 +37,9 @@ type Config struct {
 	MaxAttempts int // total attempts including the first, e.g. 3 = up to 2 retries
 	BaseBackoff time.Duration
 	MaxBackoff  time.Duration
+	// OnRetry, if set, is called once before each retry attempt (not for the
+	// first try), e.g. to count retries in a metric.
+	OnRetry func()
 }
 
 // New returns a retrying middleware. Only requests whose method is
@@ -80,6 +83,9 @@ func New(cfg Config) middleware.Middleware {
 				if !sleepWithJitter(r.Context(), cfg.BaseBackoff, cfg.MaxBackoff, attempt) {
 					aw.flushHeld()
 					return
+				}
+				if cfg.OnRetry != nil {
+					cfg.OnRetry()
 				}
 			}
 		})

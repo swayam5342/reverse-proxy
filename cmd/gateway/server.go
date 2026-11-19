@@ -16,6 +16,7 @@ import (
 	"github.com/swayam5342/jgateway/internal/config"
 	"github.com/swayam5342/jgateway/internal/health"
 	"github.com/swayam5342/jgateway/internal/middleware/bodylimit"
+	"github.com/swayam5342/jgateway/internal/middleware/circuitbreaker"
 	"github.com/swayam5342/jgateway/internal/middleware/metrics"
 	"github.com/swayam5342/jgateway/internal/middleware/ratelimit"
 	"github.com/swayam5342/jgateway/internal/middleware/recovery"
@@ -45,6 +46,14 @@ func newServer(cfg *config.Config, logger *slog.Logger) (*http.Server, error) {
 		healthHandler.Register(u.Name, readinessCheck(u.URL))
 	}
 
+	// One breaker per upstream, shared by every route that reaches it.
+	breakers := make(map[string]*circuitbreaker.Breaker)
+	for _, u := range cfg.Upstreams {
+		if u.CircuitBreaker.Enabled {
+			breakers[u.Name] = newBreaker(u)
+		}
+	}
+
 	var (
 		sharedStore ratelimit.Store
 		closers     []func()
@@ -72,7 +81,7 @@ func newServer(cfg *config.Config, logger *slog.Logger) (*http.Server, error) {
 		if !ok {
 			return nil, errNoSuchUpstream(routeCfg.Upstream)
 		}
-		handler, err := buildRouteHandler(logger, cfg.Server, routeCfg, upstreamCfgs[routeCfg.Upstream], up, sharedStore)
+		handler, err := buildRouteHandler(logger, cfg.Server, routeCfg, upstreamCfgs[routeCfg.Upstream], up, sharedStore, breakers[routeCfg.Upstream])
 		if err != nil {
 			return nil, err
 		}
@@ -164,4 +173,27 @@ func valkeyConnector(v config.ValkeyConfig) func() (valkey.Client, error) {
 		}
 		return valkey.NewClient(opt)
 	}
+}
+
+// newBreaker builds u's circuit breaker and keeps the
+// gateway_circuit_breaker_state gauge (0 closed, 1 half-open, 2 open) in
+// step with it.
+func newBreaker(u config.Upstream) *circuitbreaker.Breaker {
+	gauge := metrics.CircuitBreakerState.WithLabelValues(u.Name)
+	gauge.Set(0)
+	return circuitbreaker.New(circuitbreaker.Config{
+		FailureThreshold:    u.CircuitBreaker.FailureThreshold,
+		HalfOpenProbeAfter:  u.CircuitBreaker.HalfOpenProbeAfter,
+		HalfOpenMaxRequests: u.CircuitBreaker.HalfOpenMaxRequests,
+		OnStateChange: func(_, to circuitbreaker.State) {
+			switch to {
+			case circuitbreaker.Closed:
+				gauge.Set(0)
+			case circuitbreaker.HalfOpen:
+				gauge.Set(1)
+			case circuitbreaker.Open:
+				gauge.Set(2)
+			}
+		},
+	})
 }

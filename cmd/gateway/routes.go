@@ -25,8 +25,9 @@ import (
 // limiter keys can use the authenticated identity, signing verifies the
 // payload before it's retried/forwarded, and the circuit breaker sits
 // innermost so it trips on real upstream failures only. store is the shared
-// rate-limit store, or nil for a per-route in-memory store.
-func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg config.Route, upCfg config.Upstream, up *proxy.Upstream, store ratelimit.Store) (http.Handler, error) {
+// rate-limit store, or nil for a per-route in-memory store; br is the
+// upstream's shared circuit breaker, or nil if it has none.
+func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg config.Route, upCfg config.Upstream, up *proxy.Upstream, store ratelimit.Store, br *circuitbreaker.Breaker) (http.Handler, error) {
 	// Validated by config.Validate, so this can't fail here.
 	trusted, err := config.ParseTrustedProxies(srv.TrustedProxies)
 	if err != nil {
@@ -94,15 +95,11 @@ func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg co
 			MaxAttempts: upCfg.Retry.MaxAttempts,
 			BaseBackoff: upCfg.Retry.BaseBackoff,
 			MaxBackoff:  upCfg.Retry.MaxBackoff,
+			OnRetry:     metrics.RetryAttempts.WithLabelValues(routeCfg.PathPrefix).Inc,
 		}))
 	}
 
-	if upCfg.CircuitBreaker.Enabled {
-		br := circuitbreaker.New(circuitbreaker.Config{
-			FailureThreshold:    upCfg.CircuitBreaker.FailureThreshold,
-			HalfOpenProbeAfter:  upCfg.CircuitBreaker.HalfOpenProbeAfter,
-			HalfOpenMaxRequests: upCfg.CircuitBreaker.HalfOpenMaxRequests,
-		})
+	if br != nil {
 		mws = append(mws, circuitbreaker.Middleware(br))
 	}
 

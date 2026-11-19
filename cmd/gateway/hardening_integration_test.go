@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/swayam5342/jgateway/internal/config"
+	"github.com/swayam5342/jgateway/internal/middleware/metrics"
 )
 
 // gatewayConfig is a small, valid config with short timeouts so tests can
@@ -358,5 +360,35 @@ func TestGateway_ClientCannotForgeIdentity(t *testing.T) {
 	_ = resp.Body.Close()
 	if gotSubject != "" {
 		t.Errorf("upstream saw forged X-Auth-Subject %q", gotSubject)
+	}
+}
+
+// One dead backend trips one breaker, whichever route reached it, and the
+// breaker-state metric reflects it.
+func TestGateway_BreakerSharedAcrossRoutes(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer backend.Close()
+
+	cfg := gatewayConfig(backend.URL)
+	cfg.Upstreams[0].Name = "shared-breaker-backend"
+	cfg.Upstreams[0].CircuitBreaker = config.CircuitBreakerConfig{Enabled: true, FailureThreshold: 2, HalfOpenProbeAfter: time.Hour}
+	cfg.Routes = []config.Route{
+		{PathPrefix: "/a", Upstream: "shared-breaker-backend"},
+		{PathPrefix: "/b", Upstream: "shared-breaker-backend"},
+	}
+	gw := startGateway(t, cfg)
+
+	for range 2 {
+		if got := getStatus(t, gw.URL+"/a/x"); got != http.StatusInternalServerError {
+			t.Fatalf("/a = %d, want 500 before the breaker trips", got)
+		}
+	}
+	if got := getStatus(t, gw.URL+"/b/x"); got != http.StatusServiceUnavailable {
+		t.Errorf("/b = %d, want 503: the breaker opened by /a must protect /b too", got)
+	}
+	if v := testutil.ToFloat64(metrics.CircuitBreakerState.WithLabelValues("shared-breaker-backend")); v != 2 {
+		t.Errorf("gateway_circuit_breaker_state = %v, want 2 (open)", v)
 	}
 }

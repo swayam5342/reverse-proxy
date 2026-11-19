@@ -121,3 +121,17 @@ func TestRetry_DoesNotRetryClientErrors(t *testing.T) {
 		t.Errorf("expected 404 passed through, got %d", rec.Code)
 	}
 }
+
+func TestRetry_OnRetryCountsRetries(t *testing.T) {
+	var calls, retries int32
+	h := New(Config{MaxAttempts: 3, BaseBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond, OnRetry: func() { atomic.AddInt32(&retries, 1) }})(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if atomic.AddInt32(&calls, 1) < 3 {
+				w.WriteHeader(http.StatusBadGateway)
+			}
+		}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if retries != 2 {
+		t.Errorf("OnRetry called %d times, want 2 (502, 502, 200)", retries)
+	}
+}

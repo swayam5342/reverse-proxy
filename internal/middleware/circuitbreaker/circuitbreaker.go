@@ -52,6 +52,10 @@ type Config struct {
 	// HalfOpenMaxRequests is how many concurrent probe requests are allowed
 	// through while HalfOpen. Defaults to 1 if zero.
 	HalfOpenMaxRequests int
+	// OnStateChange, if set, is called after every state transition, outside
+	// the breaker's lock (so it may call State). Used to export the state
+	// as a metric.
+	OnStateChange func(from, to State)
 }
 
 // Breaker is a per-upstream circuit breaker. It is safe for concurrent use.
@@ -76,9 +80,24 @@ func New(cfg Config) *Breaker {
 
 // State returns the breaker's current state, for metrics/observability.
 func (b *Breaker) State() State {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer b.unlock(b.lock())
 	return b.currentStateLocked()
+}
+
+// lock acquires b.mu and returns the state at that moment, for unlock.
+func (b *Breaker) lock() State {
+	b.mu.Lock()
+	return b.state
+}
+
+// unlock releases b.mu and, if the state changed since lock, reports the
+// transition to OnStateChange.
+func (b *Breaker) unlock(before State) {
+	after := b.state
+	b.mu.Unlock()
+	if after != before && b.cfg.OnStateChange != nil {
+		b.cfg.OnStateChange(before, after)
+	}
 }
 
 // currentStateLocked resolves an Open breaker to HalfOpen once the probe
@@ -93,8 +112,7 @@ func (b *Breaker) currentStateLocked() State {
 
 // allow reserves a slot for a request, reporting whether it may proceed.
 func (b *Breaker) allow() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer b.unlock(b.lock())
 
 	switch b.currentStateLocked() {
 	case Closed:
@@ -113,8 +131,7 @@ func (b *Breaker) allow() bool {
 // recordResult updates breaker state based on the outcome of a permitted
 // request.
 func (b *Breaker) recordResult(success bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer b.unlock(b.lock())
 
 	switch b.state {
 	case HalfOpen:

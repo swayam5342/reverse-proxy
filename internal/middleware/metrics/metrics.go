@@ -61,7 +61,7 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(RequestsTotal, RequestDuration, CircuitBreakerState, RateLimitRejections, StoreFallbacks)
+	prometheus.MustRegister(RequestsTotal, RequestDuration, CircuitBreakerState, RateLimitRejections, RetryAttempts, StoreFallbacks)
 }
 
 // Handler returns the /metrics HTTP handler for the default Prometheus
