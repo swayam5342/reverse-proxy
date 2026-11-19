@@ -10,6 +10,7 @@ import (
 	"github.com/swayam5342/jgateway/internal/config"
 	"github.com/swayam5342/jgateway/internal/middleware/auth"
 	"github.com/swayam5342/jgateway/internal/middleware/circuitbreaker"
+	"github.com/swayam5342/jgateway/internal/middleware/cors"
 	"github.com/swayam5342/jgateway/internal/middleware/logging"
 	"github.com/swayam5342/jgateway/internal/middleware/metrics"
 	"github.com/swayam5342/jgateway/internal/middleware/ratelimit"
@@ -42,6 +43,19 @@ func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg co
 	var mws []pkgmw.Middleware
 	mws = append(mws, logging.New(logger, routeCfg.PathPrefix))
 	mws = append(mws, metrics.New(routeCfg.PathPrefix))
+
+	// CORS answers preflights before auth: browsers send them without
+	// credentials.
+	if routeCfg.CORS.Enabled {
+		mws = append(mws, cors.New(cors.Config{
+			AllowedOrigins:   routeCfg.CORS.AllowedOrigins,
+			AllowedMethods:   routeCfg.CORS.AllowedMethods,
+			AllowedHeaders:   routeCfg.CORS.AllowedHeaders,
+			ExposeHeaders:    routeCfg.CORS.ExposeHeaders,
+			AllowCredentials: routeCfg.CORS.AllowCredentials,
+			MaxAge:           routeCfg.CORS.MaxAge,
+		}))
+	}
 
 	if routeCfg.Auth.Enabled {
 		switch routeCfg.Auth.Mode {

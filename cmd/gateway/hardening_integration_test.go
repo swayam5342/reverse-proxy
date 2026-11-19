@@ -392,3 +392,28 @@ func TestGateway_BreakerSharedAcrossRoutes(t *testing.T) {
 		t.Errorf("gateway_circuit_breaker_state = %v, want 2 (open)", v)
 	}
 }
+
+// Browsers send preflights without credentials; a JWT route must answer
+// them, not reject them with 401.
+func TestGateway_CORSPreflightBeforeAuth(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer backend.Close()
+	t.Setenv("JWT_SECRET", "s")
+	cfg := gatewayConfig(backend.URL)
+	cfg.Routes[0].Auth = config.AuthConfig{Enabled: true, Mode: "jwt", JWTSecretEnv: "JWT_SECRET"}
+	cfg.Routes[0].CORS = config.CORSConfig{Enabled: true, AllowedOrigins: []string{"https://app.example.com"}}
+	gw := startGateway(t, cfg)
+
+	req, _ := http.NewRequest(http.MethodOptions, gw.URL+"/api/x", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Access-Control-Allow-Origin") != "https://app.example.com" {
+		t.Errorf("preflight = %d ACAO=%q, want 204 with the origin echoed", resp.StatusCode, resp.Header.Get("Access-Control-Allow-Origin"))
+	}
+}

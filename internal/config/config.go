@@ -122,6 +122,7 @@ type Route struct {
 	Auth        AuthConfig      `yaml:"auth"`
 	RateLimit   RateLimitConfig `yaml:"rate_limit"`
 	Signing     SigningConfig   `yaml:"signing"`
+	CORS        CORSConfig      `yaml:"cors"`
 }
 
 // Load reads and parses the YAML config at path, applies environment
@@ -293,6 +294,7 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Sprintf("routes[%d].rate_limit.key_strategy must be one of api_key, api_key_ip, ip, got %q", i, r.RateLimit.KeyStrategy))
 			}
 		}
+		errs = append(errs, r.CORS.validate(i)...)
 		if r.Signing.Enabled {
 			if r.Signing.SecretEnv == "" {
 				errs = append(errs, fmt.Sprintf("routes[%d].signing.secret_env must be set", i))
