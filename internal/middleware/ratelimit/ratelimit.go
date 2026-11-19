@@ -8,6 +8,8 @@
 package ratelimit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -42,6 +44,20 @@ type Config struct {
 	// of the gateway. X-Forwarded-For is only honored when the direct peer
 	// is in one of them. Leave empty if clients connect directly.
 	TrustedProxies []netip.Prefix
+	// Route namespaces this limiter's keys in a shared store (normally the
+	// route's path prefix), so routes keep independent limits.
+	Route string
+	// OnReject, if set, is called once for every request rejected with 429.
+	OnReject func()
+}
+
+// StoreKey returns the key a limiter for route uses in its Store for the
+// given client key: "jgw:rl:<route>:<first 32 hex chars of sha256(key)>".
+// Hashing keeps API-key names and client IPs out of the shared store's key
+// space.
+func StoreKey(route, key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "jgw:rl:" + route + ":" + hex.EncodeToString(sum[:])[:32]
 }
 
 // New returns a rate-limiting middleware backed by store. Requests beyond
@@ -57,7 +73,16 @@ func New(cfg Config, store Store) middleware.Middleware {
 				return
 			}
 
-			if !store.Allow(key, cfg.RequestsPerSecond, cfg.Burst, time.Now()) {
+			allowed, err := store.Allow(r.Context(), StoreKey(cfg.Route, key), cfg.RequestsPerSecond, cfg.Burst, time.Now())
+			if err != nil {
+				// Only reachable without a FallbackStore: fail closed.
+				http.Error(w, "rate limit unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if !allowed {
+				if cfg.OnReject != nil {
+					cfg.OnReject()
+				}
 				retryAfter := 1
 				if cfg.RequestsPerSecond > 0 {
 					retryAfter = int(1/cfg.RequestsPerSecond) + 1

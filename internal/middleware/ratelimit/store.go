@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -12,8 +13,11 @@ import (
 type Store interface {
 	// Allow reports whether a request for key is allowed right now, given
 	// rps (sustained rate) and burst (bucket capacity). It mutates the
-	// stored bucket state as a side effect of the check.
-	Allow(key string, rps float64, burst int, now time.Time) bool
+	// stored bucket state as a side effect of the check. A store backed by
+	// the network honours ctx and returns an error if it can't answer;
+	// now is the caller's clock, which such a store may ignore in favour of
+	// its own.
+	Allow(ctx context.Context, key string, rps float64, burst int, now time.Time) (bool, error)
 }
 
 // sweepInterval is how often MemoryStore drops buckets that have refilled.
@@ -57,8 +61,8 @@ func NewMemoryStore() *MemoryStore {
 
 // Allow implements Store using a token bucket: on each call it refills
 // tokens for elapsed time (capped at burst) and consumes one token if
-// available.
-func (s *MemoryStore) Allow(key string, rps float64, burst int, now time.Time) bool {
+// available. It never returns an error.
+func (s *MemoryStore) Allow(_ context.Context, key string, rps float64, burst int, now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -81,10 +85,10 @@ func (s *MemoryStore) Allow(key string, rps float64, burst int, now time.Time) b
 	}
 
 	if b.tokens < 1 {
-		return false
+		return false, nil
 	}
 	b.tokens--
-	return true
+	return true, nil
 }
 
 // maybeSweepLocked drops refilled buckets if sweepInterval has elapsed

@@ -71,6 +71,8 @@ func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg co
 			Burst:             routeCfg.RateLimit.Burst,
 			Strategy:          ratelimit.KeyStrategy(routeCfg.RateLimit.KeyStrategy),
 			TrustedProxies:    trusted,
+			Route:             routeCfg.PathPrefix,
+			OnReject:          metrics.RateLimitRejections.WithLabelValues(routeCfg.PathPrefix).Inc,
 		}, ratelimit.NewMemoryStore()))
 	}
 

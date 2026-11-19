@@ -20,14 +20,14 @@ func TestMemoryStore_AllowsBurstThenBlocks(t *testing.T) {
 	now := time.Now()
 
 	for i := range 3 {
-		if !s.Allow("k", 1, 3, now) {
+		if !allow(t, s, "k", 1, 3, now) {
 			t.Fatalf("request %d should be allowed within burst", i)
 		}
 	}
-	if s.Allow("k", 1, 3, now) {
+	if allow(t, s, "k", 1, 3, now) {
 		t.Fatal("4th immediate request should be blocked, burst exhausted")
 	}
-	if !s.Allow("k", 1, 3, now.Add(time.Second)) {
+	if !allow(t, s, "k", 1, 3, now.Add(time.Second)) {
 		t.Fatal("request after 1s refill at 1rps should be allowed")
 	}
 }
