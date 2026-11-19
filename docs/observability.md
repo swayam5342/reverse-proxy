@@ -15,8 +15,10 @@ the first place to look if you see `500`s with no matching upstream error.
 
 ## Metrics
 
-`GET /metrics` serves the default Prometheus registry
-(`internal/middleware/metrics`). Collectors:
+`GET /metrics` on the **admin listener** (`server.admin_addr`, default
+`127.0.0.1:9090`; never published) serves the default Prometheus registry
+(`internal/middleware/metrics`). `/healthz` and `/readyz` live there too;
+none of them are served on the public listener. Collectors:
 
 | Metric | Type | Labels | What it tells you |
 |---|---|---|---|
@@ -25,6 +27,8 @@ the first place to look if you see `500`s with no matching upstream error.
 | `gateway_circuit_breaker_state` | gauge | `upstream` | 0=closed, 1=half_open, 2=open. Alert on sustained `2`. |
 | `gateway_rate_limit_rejections_total` | counter | `route` | 429 volume — spikes indicate either abuse or a limit set too tight. |
 | `gateway_retry_attempts_total` | counter | `route` | Retry volume — sustained non-zero means an upstream is flaky, not down. |
+| `gateway_rate_limit_store_fallback_total` | counter | none | Rate-limit decisions answered from memory because Valkey was unavailable. Any sustained increase means Valkey is down and limits are per-copy only. |
+| `gateway_tls_cert_reload_errors_total` | counter | none | Renewed certificate files that failed to load (the previous certificate is still served). Alert on any increase: the old certificate will eventually expire. |
 
 Suggested alerts:
 
@@ -45,14 +49,14 @@ Two separate endpoints, deliberately not conflated
   the gateway because one backend is unreachable would make an outage
   worse, not better — liveness must not reflect that.
 - **`/readyz`** (readiness) — `200` whenever this gateway instance can
-  serve requests. Upstream reachability is reported in the JSON body
-  (`{"ready": true, "upstreams": {"users-api": "ok", "orders-api":
-  "dial tcp ...: connection refused"}}`) but deliberately does **not** fail
+  serve requests. Upstream and Valkey reachability is reported in the JSON body
+  (`{"ready": true, "checks": {"users-api": "ok", "valkey": "ok",
+  "orders-api": "dial tcp ...: connection refused"}}`) but deliberately does **not** fail
   the probe. Every replica shares the same upstreams, so if one dead
   backend made `/readyz` fail, the orchestrator would pull *every* gateway
   pod out of rotation at once and take down routes to healthy backends
   too. Isolating a dead backend is the circuit breaker's job. Checks are
-  TCP dials (`readinessCheck` in `cmd/gateway/main.go`), run concurrently
+  TCP dials (`readinessCheck` in `cmd/gateway/server.go`) and a Valkey `PING`, run concurrently
   and bounded to 2s total.
 
 ## Tracing

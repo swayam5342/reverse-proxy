@@ -86,9 +86,10 @@ func (t TLSConfig) validate(serverAddr string) []string {
 	default:
 		return []string{fmt.Sprintf("tls.mode must be one of off, acme, files; got %q", t.Mode)}
 	}
-	if t.HTTPAddr == "" {
+	switch t.HTTPAddr {
+	case "":
 		errs = append(errs, "tls.http_addr must be set when TLS is on (ACME challenges and HTTP→HTTPS redirects)")
-	} else if t.HTTPAddr == serverAddr {
+	case serverAddr:
 		errs = append(errs, "tls.http_addr must differ from server.addr")
 	}
 	return errs

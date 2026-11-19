@@ -49,8 +49,10 @@ spec:
           # must be >= server.shutdown_timeout in config.yaml.
           lifecycle:
             preStop:
-              exec:
-                command: ["sleep", "5"]
+              # Built-in sleep action (Kubernetes 1.30+): the distroless image
+              # has no sleep binary, so an exec hook would fail.
+              sleep:
+                seconds: 5
       terminationGracePeriodSeconds: 40
 ---
 apiVersion: v1

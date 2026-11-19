@@ -91,18 +91,67 @@ before the process ever accepts a connection, not discovered as a runtime
 401 storm. Never commit a real `.env` file; `.env.example` documents the
 shape only.
 
-## Host header / header injection
+## Headers backends can trust
 
-`proxy.NewReverseProxy`'s director explicitly overwrites `req.Host` and
-`req.URL.Host` from the configured upstream target — the inbound `Host`
-header is never forwarded as-is into a field the upstream might trust for
-routing or link generation.
+The gateway owns every header a backend might use for a security decision.
+Whatever a client sends under these names never reaches a backend.
+
+- **`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `Forwarded`.**
+  `proxy.NewReverseProxy` uses `httputil.ReverseProxy.Rewrite`, which drops
+  the client's copies. The gateway then sets them itself:
+  - `X-Forwarded-For` is the client IP resolved by `httpx.ClientIP`;
+  - `X-Forwarded-Host` is the original `Host`;
+  - `X-Forwarded-Proto` is `https` when the gateway terminated TLS.
+
+  The outbound `Host` is the upstream's own.
+- **`X-Auth-Subject`, `X-Auth-Method`** (and anything else starting with
+  `X-Auth-`). The gateway-wide `sanitize` middleware strips client-supplied
+  copies on every route, including routes without auth. After successful
+  authentication the auth middleware sets the subject (the JWT `sub`, or
+  the API key's *name*) and the method (`jwt` or `api_key`). A backend can
+  authorize on them, provided it is only reachable through the gateway.
+
+## API keys are named; raw keys never leave the gateway
+
+`auth.api_keys_env` holds `name:key` pairs. The name is the caller's
+identity everywhere: the request context, `X-Auth-Subject`, the rate-limit
+key and logs. The key itself is only ever compared, in constant time.
+Rate-limit keys are additionally hashed (`jgw:rl:<route>:<sha256 prefix>`),
+so Valkey never holds API-key names or client IPs in clear text.
+
+## Cookie JWTs and CSRF
+
+With `auth.jwt_cookie`, a browser's session cookie can carry the JWT.
+Browsers attach cookies to cross-site requests on their own, so a
+cookie-authenticated POST, PUT, PATCH or DELETE must also pass Go's
+`http.CrossOriginProtection`.
+
+- It passes if `Sec-Fetch-Site` is `same-origin`, or if `Origin` is one of
+  the route's `cors.allowed_origins`. Otherwise the request gets `403`.
+- Requests that use the `Authorization` header skip the check, because a
+  foreign site can't make a browser attach that header.
+- A malformed `Authorization` header never falls back to the cookie.
+
+## Path cleaning
+
+The public listener cleans paths before routing (`ServeMux` redirects
+`/api/x/../../admin` to `/admin`). A path can therefore never match one
+route's prefix, and its auth and limits, and then resolve upstream to a
+different path. Route prefixes match on segment boundaries, so `/api/users`
+doesn't match `/api/users-admin`.
+
+## Admin endpoints are not public
+
+`/healthz`, `/readyz` and `/metrics` are only served on `server.admin_addr`
+(default `127.0.0.1:9090`). Readiness bodies reveal upstream addresses and
+errors, and metrics reveal traffic patterns, so neither belongs on the
+internet. Don't publish the admin port.
 
 ## What's out of scope today
 
-- No mTLS between gateway and upstreams — see
-  [`docs/deployment.md`](deployment.md) for where TLS termination is
-  assumed to happen.
+- No mTLS between gateway and upstreams. The gateway terminates TLS for
+  clients (see [`docs/deployment.md`](deployment.md)); upstream traffic is
+  expected to stay on the host or a private network.
 - No WAF-style deep body inspection; signing and auth cover
   authenticity/integrity, not payload content validation (that's the
   upstream's job).

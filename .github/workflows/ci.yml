@@ -8,11 +8,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      # Real Valkey for the shared rate-limit store tests (VALKEY_ADDR).
+      valkey:
+        image: valkey/valkey:8.1.1
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: gofmt
@@ -33,4 +44,6 @@ jobs:
           govulncheck ./...
 
       - name: test (race)
+        env:
+          VALKEY_ADDR: localhost:6379
         run: go test ./... -race -count=1

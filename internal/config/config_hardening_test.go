@@ -175,3 +175,18 @@ routes:
 		t.Errorf("default admin_addr = %q, want 127.0.0.1:9090", Default().Server.AdminAddr)
 	}
 }
+
+// The compose deployment's config must always load.
+func TestLoad_ProdConfig(t *testing.T) {
+	t.Setenv("JWT_SECRET", "x")
+	t.Setenv("SERVICE_API_KEYS", "billing:k")
+	t.Setenv("VALKEY_PASSWORD", "x")
+	cfg, err := Load("../../deploy/config.prod.yaml")
+	if err != nil {
+		t.Fatalf("deploy/config.prod.yaml does not load: %v", err)
+	}
+	if cfg.TLS.Mode != TLSModeACME || cfg.Server.Addr != ":8443" || cfg.Server.AdminAddr != ":9090" || cfg.Valkey == nil {
+		t.Errorf("prod config: tls=%q addr=%q admin=%q valkey=%v; want acme, :8443, :9090, valkey set",
+			cfg.TLS.Mode, cfg.Server.Addr, cfg.Server.AdminAddr, cfg.Valkey != nil)
+	}
+}

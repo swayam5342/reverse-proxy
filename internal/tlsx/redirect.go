@@ -29,6 +29,9 @@ func RedirectHandler(allowedHosts []string) http.Handler {
 		if strings.Contains(host, ":") { // IPv6 literal
 			host = "[" + host + "]"
 		}
-		http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusMovedPermanently)
+		// The target host is the one the client asked for (a browser can't send
+		// a Host other than its URL's), so this only upgrades the scheme; with
+		// ACME the host must also be on the allow-list.
+		http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusMovedPermanently) //nolint:gosec // G710: same-host scheme upgrade, see above.
 	})
 }
