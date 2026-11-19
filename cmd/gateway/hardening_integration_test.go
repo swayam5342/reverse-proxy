@@ -417,3 +417,38 @@ func TestGateway_CORSPreflightBeforeAuth(t *testing.T) {
 		t.Errorf("preflight = %d ACAO=%q, want 204 with the origin echoed", resp.StatusCode, resp.Header.Get("Access-Control-Allow-Origin"))
 	}
 }
+
+// Cookie auth end to end: the route's CORS origin may POST with the
+// cookie, any other site is rejected by the CSRF check.
+func TestGateway_JWTCookieWithCSRF(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer backend.Close()
+	t.Setenv("JWT_SECRET", "cookie-secret")
+	cfg := gatewayConfig(backend.URL)
+	cfg.Routes[0].Auth = config.AuthConfig{Enabled: true, Mode: "jwt", JWTSecretEnv: "JWT_SECRET", JWTCookie: "session"}
+	cfg.Routes[0].CORS = config.CORSConfig{Enabled: true, AllowedOrigins: []string{"https://app.example.com"}, AllowCredentials: true}
+	gw := startGateway(t, cfg)
+
+	tok, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub": "u1", "exp": time.Now().Add(time.Hour).Unix(),
+	}).SignedString([]byte("cookie-secret"))
+
+	post := func(origin, site string) int {
+		req, _ := http.NewRequest(http.MethodPost, gw.URL+"/api/x", nil)
+		req.AddCookie(&http.Cookie{Name: "session", Value: tok})
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Sec-Fetch-Site", site)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if s := post("https://app.example.com", "same-site"); s != http.StatusOK {
+		t.Errorf("trusted frontend POST = %d, want 200", s)
+	}
+	if s := post("https://evil.example", "cross-site"); s != http.StatusForbidden {
+		t.Errorf("foreign site POST = %d, want 403", s)
+	}
+}

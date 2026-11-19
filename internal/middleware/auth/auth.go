@@ -74,10 +74,19 @@ type JWTConfig struct {
 	// Leeway tolerates clock skew between the issuer and the gateway when
 	// checking exp/nbf/iat.
 	Leeway time.Duration
+	// Cookie, if set, names a cookie the token is read from when the request
+	// has no Authorization header.
+	Cookie string
+	// TrustedOrigins are origins allowed to make state-changing
+	// cross-origin requests with the cookie (normally the route's CORS
+	// origins).
+	TrustedOrigins []string
 }
 
 // NewJWT returns a middleware that verifies the Authorization: Bearer <jwt>
-// header. A token is accepted only if its signature verifies with the
+// header, or, when Cookie is set and that header is absent, the named
+// cookie (cookie tokens must also pass a cross-origin check on
+// state-changing methods; failures get 403). A token is accepted only if its signature verifies with the
 // configured key and an algorithm matching that key's type, it carries an
 // unexpired "exp" and a non-empty "sub", and (when configured) its issuer
 // and audience match. Anything else results in 401.
@@ -104,15 +113,29 @@ func NewJWT(cfg JWTConfig) (middleware.Middleware, error) {
 	parser := jwt.NewParser(opts...)
 	keyFunc := func(*jwt.Token) (any, error) { return key, nil }
 
+	csrf := http.NewCrossOriginProtection()
+	for _, o := range cfg.TrustedOrigins {
+		if err := csrf.AddTrustedOrigin(o); err != nil {
+			return nil, fmt.Errorf("%w: trusted origin: %w", ErrInvalidJWTConfig, err)
+		}
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authz := r.Header.Get("Authorization")
-			const prefix = "Bearer "
-			if !strings.HasPrefix(authz, prefix) {
-				http.Error(w, "missing or malformed authorization header", http.StatusUnauthorized)
+			raw, fromCookie, ok := tokenFrom(r, cfg.Cookie)
+			if !ok {
+				http.Error(w, "missing or malformed credentials", http.StatusUnauthorized)
 				return
 			}
-			raw := strings.TrimPrefix(authz, prefix)
+			// Browsers attach cookies to cross-site requests on their own, so a
+			// cookie token must also pass the cross-origin check (safe methods
+			// and same-origin or trusted-origin requests pass).
+			if fromCookie {
+				if err := csrf.Check(r); err != nil {
+					http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+					return
+				}
+			}
 
 			// WithValidMethods rejects any alg outside the key's family
 			// before keyFunc's key is used, which blocks alg:none and
@@ -132,6 +155,27 @@ func NewJWT(cfg JWTConfig) (middleware.Middleware, error) {
 			authenticated(w, r, next, Identity{Subject: subject, Method: "jwt"})
 		})
 	}, nil
+}
+
+// tokenFrom extracts the raw JWT: from "Authorization: Bearer" when that
+// header is present (a malformed header is a failure, with no fallback),
+// otherwise from the named cookie when one is configured.
+func tokenFrom(r *http.Request, cookie string) (raw string, fromCookie, ok bool) {
+	if authz := r.Header.Get("Authorization"); authz != "" {
+		const prefix = "Bearer "
+		if !strings.HasPrefix(authz, prefix) {
+			return "", false, false
+		}
+		return strings.TrimPrefix(authz, prefix), false, true
+	}
+	if cookie == "" {
+		return "", false, false
+	}
+	c, err := r.Cookie(cookie)
+	if err != nil || c.Value == "" {
+		return "", false, false
+	}
+	return c.Value, true, true
 }
 
 // verificationKey resolves cfg to the key handed to the JWT parser and the

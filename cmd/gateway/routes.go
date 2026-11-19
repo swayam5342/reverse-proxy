@@ -64,6 +64,12 @@ func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg co
 				Issuer:   routeCfg.Auth.Issuer,
 				Audience: routeCfg.Auth.Audience,
 				Leeway:   routeCfg.Auth.Leeway,
+				Cookie:   routeCfg.Auth.JWTCookie,
+			}
+			if routeCfg.Auth.JWTCookie != "" && routeCfg.CORS.Enabled {
+				// The CORS origins are the frontends allowed to send
+				// cookie-authenticated state-changing requests.
+				jwtCfg.TrustedOrigins = routeCfg.CORS.AllowedOrigins
 			}
 			if routeCfg.Auth.JWTSecretEnv != "" {
 				jwtCfg.Secret = []byte(os.Getenv(routeCfg.Auth.JWTSecretEnv))

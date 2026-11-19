@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -98,8 +99,12 @@ type AuthConfig struct {
 	Issuer   string `yaml:"issuer"`
 	Audience string `yaml:"audience"`
 	// Leeway tolerates issuer/gateway clock skew on exp/nbf/iat.
-	Leeway     time.Duration `yaml:"leeway"`
-	APIKeysEnv string        `yaml:"api_keys_env"` // env var holding comma-separated valid keys
+	Leeway time.Duration `yaml:"leeway"`
+	// JWTCookie names a cookie the JWT is read from when the request has no
+	// Authorization header (browser sessions). Cookie-authenticated
+	// state-changing requests must pass a cross-origin (CSRF) check.
+	JWTCookie  string `yaml:"jwt_cookie"`
+	APIKeysEnv string `yaml:"api_keys_env"` // env var holding comma-separated valid keys
 }
 
 // SigningConfig configures HMAC request signing verification for a route.
@@ -295,6 +300,16 @@ func (c *Config) Validate() error {
 			}
 		}
 		errs = append(errs, r.CORS.validate(i)...)
+		if r.Auth.JWTCookie != "" {
+			switch {
+			case !r.Auth.Enabled || r.Auth.Mode != "jwt":
+				errs = append(errs, fmt.Sprintf("routes[%d].auth.jwt_cookie requires auth.enabled with mode jwt", i))
+			case r.CORS.Enabled && slices.Contains(r.CORS.AllowedOrigins, "*"):
+				errs = append(errs, fmt.Sprintf("routes[%d]: auth.jwt_cookie cannot be used with cors.allowed_origins \"*\"; list the frontend's exact origin", i))
+			case r.CORS.Enabled && !r.CORS.AllowCredentials:
+				errs = append(errs, fmt.Sprintf("routes[%d]: auth.jwt_cookie with cors needs cors.allow_credentials: true, or browsers won't send the cookie cross-origin", i))
+			}
+		}
 		if r.Signing.Enabled {
 			if r.Signing.SecretEnv == "" {
 				errs = append(errs, fmt.Sprintf("routes[%d].signing.secret_env must be set", i))
