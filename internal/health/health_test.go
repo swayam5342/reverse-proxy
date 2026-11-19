@@ -44,8 +44,8 @@ func TestReadiness_FailingUpstreamCheck_StillReadyAndReported(t *testing.T) {
 	}
 
 	var body struct {
-		Ready     bool              `json:"ready"`
-		Upstreams map[string]string `json:"upstreams"`
+		Ready  bool              `json:"ready"`
+		Checks map[string]string `json:"checks"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decoding body: %v", err)
@@ -53,11 +53,11 @@ func TestReadiness_FailingUpstreamCheck_StillReadyAndReported(t *testing.T) {
 	if !body.Ready {
 		t.Error("expected ready=true")
 	}
-	if body.Upstreams["backend"] != "connection refused" {
-		t.Errorf("upstreams[backend] = %q, want the check error", body.Upstreams["backend"])
+	if body.Checks["backend"] != "connection refused" {
+		t.Errorf("checks[backend] = %q, want the check error", body.Checks["backend"])
 	}
-	if body.Upstreams["other"] != "ok" {
-		t.Errorf("upstreams[other] = %q, want ok", body.Upstreams["other"])
+	if body.Checks["other"] != "ok" {
+		t.Errorf("checks[other] = %q, want ok", body.Checks["other"])
 	}
 }
 

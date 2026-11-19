@@ -19,6 +19,16 @@ server:
   trusted_proxies: []
   #  - 10.0.0.0/8
 
+# Shared rate-limit store. With it, every gateway copy shares one set of
+# limits; while Valkey is unreachable each copy falls back to in-memory
+# limits and switches back automatically. Omit to use in-memory limits only.
+# valkey:
+#   addr: "valkey:6379"
+#   password_env: VALKEY_PASSWORD
+#   db: 0
+#   tls: false
+#   timeout: 50ms
+
 upstreams:
   - name: users-api
     url: "http://users-api.internal:8081"

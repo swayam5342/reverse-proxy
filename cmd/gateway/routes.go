@@ -24,8 +24,9 @@ import (
 // everything for full observability, auth runs before rate limiting so
 // limiter keys can use the authenticated identity, signing verifies the
 // payload before it's retried/forwarded, and the circuit breaker sits
-// innermost so it trips on real upstream failures only.
-func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg config.Route, upCfg config.Upstream, up *proxy.Upstream) (http.Handler, error) {
+// innermost so it trips on real upstream failures only. store is the shared
+// rate-limit store, or nil for a per-route in-memory store.
+func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg config.Route, upCfg config.Upstream, up *proxy.Upstream, store ratelimit.Store) (http.Handler, error) {
 	// Validated by config.Validate, so this can't fail here.
 	trusted, err := config.ParseTrustedProxies(srv.TrustedProxies)
 	if err != nil {
@@ -66,6 +67,9 @@ func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg co
 	}
 
 	if routeCfg.RateLimit.Enabled {
+		if store == nil {
+			store = ratelimit.NewMemoryStore() // no shared store: per-route, per-process
+		}
 		mws = append(mws, ratelimit.New(ratelimit.Config{
 			RequestsPerSecond: routeCfg.RateLimit.RequestsPerSecond,
 			Burst:             routeCfg.RateLimit.Burst,
@@ -73,7 +77,7 @@ func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg co
 			TrustedProxies:    trusted,
 			Route:             routeCfg.PathPrefix,
 			OnReject:          metrics.RateLimitRejections.WithLabelValues(routeCfg.PathPrefix).Inc,
-		}, ratelimit.NewMemoryStore()))
+		}, store))
 	}
 
 	if routeCfg.Signing.Enabled {

@@ -42,8 +42,8 @@ func NewHandler(timeout time.Duration) *Handler {
 	return &Handler{timeout: timeout, checkers: make(map[string]Checker)}
 }
 
-// Register adds a named upstream check. Its result is reported in the
-// /readyz body but never makes the gateway itself unready.
+// Register adds a named dependency check (an upstream, Valkey). Its result
+// is reported in the /readyz body but never makes the gateway unready.
 func (h *Handler) Register(name string, c Checker) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -58,8 +58,8 @@ func (h *Handler) Liveness(w http.ResponseWriter, r *http.Request) {
 }
 
 // Readiness answers /readyz. It returns 200 whenever the process can serve
-// requests, with a JSON body reporting each upstream as "ok" or the error
-// its check returned.
+// requests, with a JSON body ("checks") reporting each registered check
+// (upstreams, Valkey) as "ok" or the error it returned.
 func (h *Handler) Readiness(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	checkers := maps.Clone(h.checkers)
@@ -88,5 +88,5 @@ func (h *Handler) Readiness(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "upstreams": results})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "checks": results})
 }

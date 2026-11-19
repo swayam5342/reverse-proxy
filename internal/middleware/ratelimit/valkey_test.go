@@ -161,3 +161,20 @@ func TestValkeyStore_ConcurrentCallsDontWaitForConnect(t *testing.T) {
 		t.Errorf("second call waited %v for the in-progress connect", waited)
 	}
 }
+
+// After shutdown closes the store, in-flight requests must not dial a new
+// connection.
+func TestValkeyStore_ClosedStoreDoesNotReconnect(t *testing.T) {
+	var calls atomic.Int32
+	s := NewValkeyStore(func() (valkey.Client, error) {
+		calls.Add(1)
+		return nil, errors.New("down")
+	})
+	s.Close()
+	if _, err := s.Allow(context.Background(), "k", 1, 1, time.Now()); !errors.Is(err, ErrStoreUnavailable) {
+		t.Errorf("err = %v, want ErrStoreUnavailable", err)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("connect called %d times after Close, want 0", n)
+	}
+}

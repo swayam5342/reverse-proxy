@@ -23,6 +23,8 @@ type Config struct {
 	Server    ServerConfig `yaml:"server"`
 	Upstreams []Upstream   `yaml:"upstreams"`
 	Routes    []Route      `yaml:"routes"`
+	// Valkey, if set, makes rate limits shared across gateway copies.
+	Valkey *ValkeyConfig `yaml:"valkey"`
 }
 
 // ServerConfig controls the listener and top-level timeouts.
@@ -139,6 +141,10 @@ func Load(path string) (*Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("config: parsing %s: %w", path, err)
+	}
+
+	if cfg.Valkey != nil {
+		cfg.Valkey.applyDefaults()
 	}
 
 	if addr := os.Getenv("GATEWAY_ADDR"); addr != "" {
@@ -297,6 +303,10 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Sprintf("routes[%d].signing.header_name must be set", i))
 			}
 		}
+	}
+
+	if c.Valkey != nil {
+		errs = append(errs, c.Valkey.validate()...)
 	}
 
 	if len(errs) > 0 {

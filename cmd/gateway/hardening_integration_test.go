@@ -76,11 +76,11 @@ func TestGateway_ReadyWhileUpstreamDown(t *testing.T) {
 		t.Fatalf("/readyz = %d, want 200 with an upstream down", resp.StatusCode)
 	}
 	var body struct {
-		Upstreams map[string]string `json:"upstreams"`
+		Checks map[string]string `json:"checks"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&body)
-	if s := body.Upstreams["backend"]; s == "" || s == "ok" {
-		t.Errorf("upstreams[backend] = %q, want the dial error reported", s)
+	if s := body.Checks["backend"]; s == "" || s == "ok" {
+		t.Errorf("checks[backend] = %q, want the dial error reported", s)
 	}
 }
 

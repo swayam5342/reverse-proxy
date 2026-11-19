@@ -45,6 +45,13 @@ var (
 		Help: "Total requests rejected by the rate limiter, labeled by route.",
 	}, []string{"route"})
 
+	// StoreFallbacks counts rate-limit decisions answered by the in-memory
+	// fallback because the shared store (Valkey) was unavailable.
+	StoreFallbacks = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "gateway_rate_limit_store_fallback_total",
+		Help: "Rate-limit decisions answered by the in-memory fallback because the shared store was unavailable.",
+	})
+
 	// RetryAttempts counts retry attempts (beyond the first try) issued per
 	// route.
 	RetryAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -54,7 +61,7 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(RequestsTotal, RequestDuration, CircuitBreakerState, RateLimitRejections)
+	prometheus.MustRegister(RequestsTotal, RequestDuration, CircuitBreakerState, RateLimitRejections, StoreFallbacks)
 }
 
 // Handler returns the /metrics HTTP handler for the default Prometheus

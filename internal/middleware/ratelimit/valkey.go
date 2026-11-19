@@ -48,6 +48,7 @@ type ValkeyStore struct {
 
 	mu     sync.RWMutex
 	client valkey.Client
+	closed bool
 }
 
 // NewValkeyStore returns a store that obtains its client from connect on
@@ -86,10 +87,12 @@ func (s *ValkeyStore) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the Valkey client, if one was connected.
+// Close closes the Valkey client, if one was connected. A closed store
+// never reconnects; every later call returns ErrStoreUnavailable.
 func (s *ValkeyStore) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closed = true
 	if s.client != nil {
 		s.client.Close()
 		s.client = nil
@@ -98,8 +101,11 @@ func (s *ValkeyStore) Close() {
 
 func (s *ValkeyStore) getClient() (valkey.Client, error) {
 	s.mu.RLock()
-	c := s.client
+	c, closed := s.client, s.closed
 	s.mu.RUnlock()
+	if closed {
+		return nil, fmt.Errorf("%w: closed", ErrStoreUnavailable)
+	}
 	if c != nil {
 		return c, nil
 	}
@@ -121,7 +127,11 @@ func (s *ValkeyStore) getClient() (valkey.Client, error) {
 		return nil, fmt.Errorf("%w: connect: %w", ErrStoreUnavailable, err)
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		c.Close()
+		return nil, fmt.Errorf("%w: closed", ErrStoreUnavailable)
+	}
 	s.client = c
-	s.mu.Unlock()
 	return c, nil
 }
