@@ -1,33 +1,49 @@
 // Package health provides the /healthz (liveness) and /readyz (readiness)
 // endpoints, kept deliberately separate: liveness answers "is the process
-// alive," readiness answers "can it actually serve traffic right now."
+// alive," readiness answers "can this gateway instance serve traffic right
+// now."
+//
+// Upstream health deliberately does NOT affect readiness. Every gateway
+// replica shares the same upstreams, so if one dead upstream made /readyz
+// fail, the orchestrator would pull every replica out of rotation at once
+// and take down routes to healthy upstreams too. Per-upstream failure is the
+// circuit breaker's job; /readyz only reports upstream status in its body,
+// for debugging.
 package health
 
 import (
+	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Checker reports whether a dependency (typically an upstream) is currently
-// healthy. It should be cheap and non-blocking-for-long — readiness is
-// polled frequently by orchestrators.
-type Checker func() error
+// reachable. It must return promptly once ctx is done.
+type Checker func(ctx context.Context) error
 
 // Handler serves /healthz and /readyz.
 type Handler struct {
+	timeout time.Duration
+
 	mu       sync.RWMutex
 	checkers map[string]Checker
 }
 
-// NewHandler returns a Handler with no readiness checks registered; use
-// Register to add upstream/dependency checks.
-func NewHandler() *Handler {
-	return &Handler{checkers: make(map[string]Checker)}
+// NewHandler returns a Handler with no upstream checks registered. timeout
+// bounds how long /readyz waits for all upstream checks together; checks
+// run concurrently, so one hung upstream costs at most one timeout.
+func NewHandler(timeout time.Duration) *Handler {
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	return &Handler{timeout: timeout, checkers: make(map[string]Checker)}
 }
 
-// Register adds a named readiness check. All registered checks must pass
-// for /readyz to report ready.
+// Register adds a named dependency check (an upstream, Valkey). Its result
+// is reported in the /readyz body but never makes the gateway unready.
 func (h *Handler) Register(name string, c Checker) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -35,33 +51,42 @@ func (h *Handler) Register(name string, c Checker) {
 }
 
 // Liveness answers /healthz: 200 as long as the process can handle HTTP
-// requests at all. It never depends on upstream state, so a dead backend
-// never causes the orchestrator to kill and restart a perfectly healthy
-// gateway process.
+// requests at all.
 func (h *Handler) Liveness(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
 
-// Readiness answers /readyz: 200 only if every registered checker passes,
-// otherwise 503 with a JSON body naming which checks failed.
+// Readiness answers /readyz. It returns 200 whenever the process can serve
+// requests, with a JSON body ("checks") reporting each registered check
+// (upstreams, Valkey) as "ok" or the error it returned.
 func (h *Handler) Readiness(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	checkers := maps.Clone(h.checkers)
+	h.mu.RUnlock()
 
-	failures := make(map[string]string)
-	for name, check := range h.checkers {
-		if err := check(); err != nil {
-			failures[name] = err.Error()
-		}
+	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
+	defer cancel()
+
+	var (
+		wg      sync.WaitGroup
+		resMu   sync.Mutex
+		results = make(map[string]string, len(checkers))
+	)
+	for name, check := range checkers {
+		wg.Go(func() {
+			status := "ok"
+			if err := check(ctx); err != nil {
+				status = err.Error()
+			}
+			resMu.Lock()
+			results[name] = status
+			resMu.Unlock()
+		})
 	}
+	wg.Wait()
 
 	w.Header().Set("Content-Type", "application/json")
-	if len(failures) > 0 {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]any{"ready": false, "failures": failures})
-		return
-	}
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ready": true})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "checks": results})
 }

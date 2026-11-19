@@ -1,17 +1,21 @@
 // Package ratelimit implements a token-bucket rate limiter middleware with a
 // pluggable Store. Per AGENTS.md, the rate limit key must be chosen
-// carefully: client IP alone is spoofable behind a proxy, so IP is only
-// trusted from X-Forwarded-For when the caller explicitly says the upstream
-// LB is trusted; otherwise prefer API key (+ IP as a secondary dimension).
+// carefully: client IP alone is spoofable behind a proxy, so
+// X-Forwarded-For is only consulted when the direct peer is a configured
+// trusted proxy, and even then it is read right-to-left so a client can't
+// inject its own entry; otherwise prefer API key (+ IP as a secondary
+// dimension).
 package ratelimit
 
 import (
-	"net"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
+	"net/netip"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/swayam5342/jgateway/internal/httpx"
 	"github.com/swayam5342/jgateway/internal/middleware/auth"
 	"github.com/swayam5342/jgateway/pkg/middleware"
 )
@@ -27,9 +31,7 @@ const (
 	// KeyAPIKeyIP buckets by identity+IP, narrowing blast radius of a single
 	// leaked key.
 	KeyAPIKeyIP KeyStrategy = "api_key_ip"
-	// KeyIP buckets by client IP only. Only safe when TrustForwardedFor is
-	// true and the gateway sits behind a trusted LB that sets/overwrites
-	// X-Forwarded-For; otherwise this key is trivially spoofable.
+	// KeyIP buckets by client IP only (see httpx.ClientIP for how it's derived).
 	KeyIP KeyStrategy = "ip"
 )
 
@@ -38,10 +40,24 @@ type Config struct {
 	RequestsPerSecond float64
 	Burst             int
 	Strategy          KeyStrategy
-	// TrustForwardedFor must only be true if the gateway sits behind a
-	// trusted load balancer that sets X-Forwarded-For itself (never taking
-	// an attacker-supplied value as-is).
-	TrustForwardedFor bool
+	// TrustedProxies lists the networks of load balancers / proxies in front
+	// of the gateway. X-Forwarded-For is only honored when the direct peer
+	// is in one of them. Leave empty if clients connect directly.
+	TrustedProxies []netip.Prefix
+	// Route namespaces this limiter's keys in a shared store (normally the
+	// route's path prefix), so routes keep independent limits.
+	Route string
+	// OnReject, if set, is called once for every request rejected with 429.
+	OnReject func()
+}
+
+// StoreKey returns the key a limiter for route uses in its Store for the
+// given client key: "jgw:rl:<route>:<first 32 hex chars of sha256(key)>".
+// Hashing keeps API-key names and client IPs out of the shared store's key
+// space.
+func StoreKey(route, key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "jgw:rl:" + route + ":" + hex.EncodeToString(sum[:])[:32]
 }
 
 // New returns a rate-limiting middleware backed by store. Requests beyond
@@ -57,7 +73,16 @@ func New(cfg Config, store Store) middleware.Middleware {
 				return
 			}
 
-			if !store.Allow(key, cfg.RequestsPerSecond, cfg.Burst, time.Now()) {
+			allowed, err := store.Allow(r.Context(), StoreKey(cfg.Route, key), cfg.RequestsPerSecond, cfg.Burst, time.Now())
+			if err != nil {
+				// Only reachable without a FallbackStore: fail closed.
+				http.Error(w, "rate limit unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if !allowed {
+				if cfg.OnReject != nil {
+					cfg.OnReject()
+				}
 				retryAfter := 1
 				if cfg.RequestsPerSecond > 0 {
 					retryAfter = int(1/cfg.RequestsPerSecond) + 1
@@ -85,26 +110,10 @@ func rateLimitKey(r *http.Request, cfg Config) string {
 		if identitySubject == "" {
 			return ""
 		}
-		return identitySubject + "|" + clientIP(r, cfg.TrustForwardedFor)
+		return identitySubject + "|" + httpx.ClientIP(r, cfg.TrustedProxies)
 	case KeyIP:
-		return clientIP(r, cfg.TrustForwardedFor)
+		return httpx.ClientIP(r, cfg.TrustedProxies)
 	default:
 		return ""
 	}
-}
-
-func clientIP(r *http.Request, trustForwardedFor bool) string {
-	if trustForwardedFor {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// Leftmost entry is the original client per the (trusted) LB's
-			// convention.
-			first, _, _ := strings.Cut(xff, ",")
-			return strings.TrimSpace(first)
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }

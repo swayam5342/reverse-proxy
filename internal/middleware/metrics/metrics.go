@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/swayam5342/jgateway/internal/middleware/statusrec"
 	"github.com/swayam5342/jgateway/pkg/middleware"
 )
 
@@ -44,6 +45,20 @@ var (
 		Help: "Total requests rejected by the rate limiter, labeled by route.",
 	}, []string{"route"})
 
+	// StoreFallbacks counts rate-limit decisions answered by the in-memory
+	// fallback because the shared store (Valkey) was unavailable.
+	StoreFallbacks = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "gateway_rate_limit_store_fallback_total",
+		Help: "Rate-limit decisions answered by the in-memory fallback because the shared store was unavailable.",
+	})
+
+	// TLSCertReloadErrors counts failed reloads of a renewed certificate
+	// file (the previous certificate keeps being served).
+	TLSCertReloadErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "gateway_tls_cert_reload_errors_total",
+		Help: "Failed reloads of renewed TLS certificate files; the previous certificate is still served.",
+	})
+
 	// RetryAttempts counts retry attempts (beyond the first try) issued per
 	// route.
 	RetryAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -53,7 +68,7 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(RequestsTotal, RequestDuration, CircuitBreakerState, RateLimitRejections)
+	prometheus.MustRegister(RequestsTotal, RequestDuration, CircuitBreakerState, RateLimitRejections, RetryAttempts, StoreFallbacks, TLSCertReloadErrors)
 }
 
 // Handler returns the /metrics HTTP handler for the default Prometheus
@@ -62,27 +77,17 @@ func Handler() http.Handler {
 	return promhttp.Handler()
 }
 
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
 // New returns a middleware that records request count and latency for
 // route against RequestsTotal/RequestDuration.
 func New(route string) middleware.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
-			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			rec := statusrec.New(w)
 
 			next.ServeHTTP(rec, r)
 
-			status := strconv.Itoa(rec.status)
+			status := strconv.Itoa(rec.Status())
 			RequestsTotal.WithLabelValues(route, r.Method, status).Inc()
 			RequestDuration.WithLabelValues(route, status).Observe(time.Since(start).Seconds())
 		})

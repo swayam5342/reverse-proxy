@@ -17,6 +17,14 @@ spec:
           image: gateway:latest
           ports:
             - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: admin # health, readiness, metrics; not exposed by the Service
+          env:
+            # The image defaults admin_addr to 127.0.0.1:9090; kubelet probes
+            # and Prometheus need it on the pod IP.
+            - name: GATEWAY_ADMIN_ADDR
+              value: ":9090"
           envFrom:
             - secretRef:
                 name: gateway-secrets
@@ -30,19 +38,21 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8080
+              port: admin
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8080
+              port: admin
             periodSeconds: 5
           # Give in-flight requests time to drain during a rolling deploy;
           # must be >= server.shutdown_timeout in config.yaml.
           lifecycle:
             preStop:
-              exec:
-                command: ["sleep", "5"]
+              # Built-in sleep action (Kubernetes 1.30+): the distroless image
+              # has no sleep binary, so an exec hook would fail.
+              sleep:
+                seconds: 5
       terminationGracePeriodSeconds: 40
 ---
 apiVersion: v1

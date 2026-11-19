@@ -90,3 +90,30 @@ func TestBreaker_SuccessDoesNotTrip(t *testing.T) {
 		t.Errorf("expected breaker to remain Closed on success, got %s", br.State())
 	}
 }
+
+// State changes are reported so the gateway can export them as a metric.
+func TestBreaker_OnStateChangeSequence(t *testing.T) {
+	var got []string
+	br := New(Config{
+		FailureThreshold:   1,
+		HalfOpenProbeAfter: 20 * time.Millisecond,
+		OnStateChange:      func(from, to State) { got = append(got, from.String()+"→"+to.String()) },
+	})
+	status := http.StatusInternalServerError
+	h := Middleware(br)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil)) // fails → open
+	time.Sleep(25 * time.Millisecond)
+	status = http.StatusOK
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil)) // probe succeeds → closed
+
+	want := []string{"closed→open", "open→half_open", "half_open→closed"}
+	if len(got) != len(want) {
+		t.Fatalf("transitions = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("transition %d = %s, want %s", i, got[i], want[i])
+		}
+	}
+}

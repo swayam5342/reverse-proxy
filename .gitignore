@@ -1,1 +1,5 @@
 examples
+
+# Real secrets: only the *.example templates are committed.
+.env
+deploy/.env

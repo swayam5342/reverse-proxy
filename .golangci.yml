@@ -9,3 +9,11 @@ linters:
     - unused
     - ineffassign
     - gosec
+  exclusions:
+    rules:
+      # gosec targets production code; in tests it flags throwaway cookies,
+      # math/rand for unique keys and fake credentials. govet, staticcheck
+      # and errcheck still run on tests.
+      - path: _test\.go
+        linters:
+          - gosec

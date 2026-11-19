@@ -8,7 +8,7 @@
 
 `jgateway` is a reverse proxy and API gateway written in **Go**, with a **composable middleware pipeline**. It sits in front of backend services and handles the cross-cutting concerns: **auth, rate limiting, request signing, circuit breaking, retries and observability**. The core proxy stays simple; adding a feature means writing a new middleware, not touching the core.
 
-[![Go](https://img.shields.io/badge/Go-1.25%2B-4cb3f0?style=flat-square&logo=go&logoColor=white&labelColor=0d3a55)](go.mod)
+[![Go](https://img.shields.io/badge/Go-1.26%2B-4cb3f0?style=flat-square&logo=go&logoColor=white&labelColor=0d3a55)](go.mod)
 [![CI](https://img.shields.io/github/actions/workflow/status/swayam5342/reverse-proxy/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&labelColor=0d3a55&color=4cb3f0&label=CI)](.github/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-distroless%2C%20non--root-4cb3f0?style=flat-square&logo=docker&logoColor=white&labelColor=0d3a55)](#option-b-docker)
 [![Metrics](https://img.shields.io/badge/metrics-Prometheus-4cb3f0?style=flat-square&logo=prometheus&logoColor=white&labelColor=0d3a55)](docs/observability.md)
@@ -34,9 +34,11 @@
 
 | Feature | What it means |
 | :--- | :--- |
-| **Data-driven routing** | Longest-prefix path matching to any number of upstreams, each with its own dial and response timeouts. |
-| **Auth** | JWT (HMAC) or API key verification. Fails closed on any error. |
-| **Rate limiting** | Token bucket, keyed by authenticated identity rather than naive client IP, to resist spoofing. |
+| **Data-driven routing** | Longest-prefix matching on path segments, optional prefix stripping, and per-upstream dial and response timeouts. |
+| **TLS** | Automatic Let's Encrypt certificates, or your own files reloaded on renewal; HTTP→HTTPS redirect. |
+| **Auth** | JWT (HMAC or an identity provider's public key, from a header or a session cookie with CSRF protection) or named API keys. Fails closed; backends receive a trusted `X-Auth-Subject`. |
+| **CORS** | Per-route origins for browser frontends; preflights are answered before auth. |
+| **Rate limiting** | Token bucket keyed by identity (or a spoof-resistant client IP), shared across gateway copies through Valkey, with an in-memory fallback if Valkey is down. |
 | **Request signing** | HMAC-SHA256 verification with replay and clock-skew protection. |
 | **Resilience** | Idempotency-aware retries with jittered exponential backoff, and a per-upstream circuit breaker (closed → open → half-open). |
 | **Observability** | Structured JSON logging, Prometheus metrics, and separate liveness and readiness endpoints. |
@@ -48,12 +50,12 @@ See [`docs/architecture.md`](docs/architecture.md) for how these fit together an
 
 ## Endpoints
 
-| Route | Purpose |
-| :--- | :--- |
-| `/healthz` | Liveness: the process is up. Returns `200` and `ok`. |
-| `/readyz` | Readiness: whether it can actually serve. Returns JSON. |
-| `/metrics` | Prometheus metrics. |
-| Your `routes[].path_prefix` | Proxied to the matching upstream through that route's middleware chain. |
+| Listener | Route | Purpose |
+| :--- | :--- | :--- |
+| public (`server.addr`) | Your `routes[].path_prefix` | Proxied to the matching upstream through that route's middleware chain. |
+| admin (`server.admin_addr`, default `127.0.0.1:9090`, never publish) | `/healthz` | Liveness: the process is up. |
+| admin | `/readyz` | Readiness, with each upstream's and Valkey's status as JSON. |
+| admin | `/metrics` | Prometheus metrics. |
 
 <br>
 
@@ -61,7 +63,7 @@ See [`docs/architecture.md`](docs/architecture.md) for how these fit together an
 
 | Requirement | When |
 | :--- | :--- |
-| **Go 1.25+** | To build or run locally. |
+| **Go 1.26+** | To build or run locally. |
 | **Docker** | For the image, or the end-to-end example in [`examples/`](examples/README.md). |
 
 <br>
@@ -103,6 +105,9 @@ docker run -p 8080:8080 --env-file .env jgateway
 
 The image is a multi-stage build producing a minimal distroless binary that runs as a non-root user (see [`Dockerfile`](Dockerfile)).
 
+> [!IMPORTANT]
+> For production on a single server, use [`deploy/docker-compose.yml`](deploy/docker-compose.yml). It runs the gateway with automatic HTTPS and Valkey; the walkthrough is in [`docs/deployment.md`](docs/deployment.md#single-server-with-compose).
+
 > [!TIP]
 > To see the whole pipeline running against real backends, [`examples/README.md`](examples/README.md) has a Docker Compose setup with three demo services covering every middleware.
 
@@ -116,9 +121,11 @@ Routes, upstreams and their middleware are data, not code. [`docs/configuration.
 | :--- | :--- | :--- |
 | `GATEWAY_CONFIG` | `config.yaml` | Path to the YAML config. |
 | `GATEWAY_ADDR` | `:8080` | Listen address; overrides `server.addr`. |
+| `GATEWAY_ADMIN_ADDR` | `:9090` | Admin listener; overrides `server.admin_addr` (use `:9090` in containers). |
 | `JWT_SECRET` | `change-me` | Secret for JWT routes (named by `auth.jwt_secret_env`). |
-| `ORDERS_API_KEYS` | `change-me-key-1,change-me-key-2` | API keys for an `api_key` route (named by `auth.api_keys_env`). |
+| `ORDERS_API_KEYS` | `billing-svc:change-me-key-1,reports:change-me-key-2` | `name:key` pairs for an `api_key` route (named by `auth.api_keys_env`). The name identifies the caller. |
 | `ORDERS_SIGNING_SECRET` | `change-me` | HMAC secret for a signed route. |
+| `VALKEY_PASSWORD` | `change-me` | Password for the shared rate-limit store (named by `valkey.password_env`). |
 
 <details>
 <summary><b>An upstream and a route</b> (from <code>config.example.yaml</code>)</summary>
@@ -128,7 +135,7 @@ upstreams:
   - name: users-api
     url: "http://users-api.internal:8081"
     dial_timeout: 2s
-    request_timeout: 5s
+    request_timeout: 2s
     circuit_breaker:
       enabled: true
       failure_threshold: 5
@@ -139,7 +146,6 @@ upstreams:
       max_attempts: 3
       base_backoff: 100ms
       max_backoff: 2s
-      idempotent_only: true
 
 routes:
   - path_prefix: "/api/users"

@@ -92,3 +92,26 @@ func TestNew_OnePanicDoesNotAffectSubsequentRequests(t *testing.T) {
 		t.Errorf("expected 200 on unrelated request, got %d", rec2.Code)
 	}
 }
+
+// http.ErrAbortHandler is net/http's sanctioned way to abort a response
+// mid-stream (httputil.ReverseProxy uses it when the upstream body copy
+// fails). It must propagate so the server closes the connection quietly,
+// rather than being logged as a bug and answered with a bogus 500.
+func TestNew_RepanicsErrAbortHandler(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	h := New(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+
+	defer func() {
+		if rec := recover(); rec != http.ErrAbortHandler {
+			t.Errorf("recovered %v, want http.ErrAbortHandler to propagate", rec)
+		}
+		if strings.Contains(buf.String(), "panic recovered") {
+			t.Error("ErrAbortHandler should not be logged as a panic")
+		}
+	}()
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+}

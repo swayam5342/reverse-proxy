@@ -5,9 +5,14 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
+	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +24,10 @@ type Config struct {
 	Server    ServerConfig `yaml:"server"`
 	Upstreams []Upstream   `yaml:"upstreams"`
 	Routes    []Route      `yaml:"routes"`
+	// TLS configures TLS termination (default: off).
+	TLS TLSConfig `yaml:"tls"`
+	// Valkey, if set, makes rate limits shared across gateway copies.
+	Valkey *ValkeyConfig `yaml:"valkey"`
 }
 
 // ServerConfig controls the listener and top-level timeouts.
@@ -29,6 +38,24 @@ type ServerConfig struct {
 	IdleTimeout       time.Duration `yaml:"idle_timeout"`
 	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
 	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
+	// AdminAddr serves /healthz, /readyz and /metrics, which never appear on
+	// the public listener. Default 127.0.0.1:9090; use ":9090" in containers
+	// (GATEWAY_ADMIN_ADDR) so probes and Prometheus can reach it, and never
+	// publish it.
+	AdminAddr string `yaml:"admin_addr"`
+
+	// RequestTimeout is the overall deadline for one request through the
+	// whole chain, retries and backoff included. Must be shorter than
+	// WriteTimeout so the resulting 504 can still be written.
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// UpgradeTimeout is the maximum lifetime of an upgraded (WebSocket)
+	// connection; it replaces read/write timeouts for those connections.
+	UpgradeTimeout time.Duration `yaml:"upgrade_timeout"`
+	// MaxBodyBytes caps request body size (413 above it). 0 disables the cap.
+	MaxBodyBytes int64 `yaml:"max_body_bytes"`
+	// TrustedProxies lists CIDRs (or bare IPs) of load balancers in front of
+	// the gateway. X-Forwarded-For is only honored from these peers.
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 // Upstream is a backend service the gateway can proxy to.
@@ -52,28 +79,39 @@ type CircuitBreakerConfig struct {
 
 // RetryConfig configures retry behavior for a route/upstream.
 type RetryConfig struct {
-	Enabled        bool          `yaml:"enabled"`
-	MaxAttempts    int           `yaml:"max_attempts"`
-	BaseBackoff    time.Duration `yaml:"base_backoff"`
-	MaxBackoff     time.Duration `yaml:"max_backoff"`
-	IdempotentOnly bool          `yaml:"idempotent_only"`
+	Enabled     bool          `yaml:"enabled"`
+	MaxAttempts int           `yaml:"max_attempts"`
+	BaseBackoff time.Duration `yaml:"base_backoff"`
+	MaxBackoff  time.Duration `yaml:"max_backoff"`
 }
 
 // RateLimitConfig configures the token bucket limiter for a route.
 type RateLimitConfig struct {
-	Enabled           bool          `yaml:"enabled"`
-	RequestsPerSecond float64       `yaml:"requests_per_second"`
-	Burst             int           `yaml:"burst"`
-	Window            time.Duration `yaml:"window"`
-	KeyStrategy       string        `yaml:"key_strategy"` // "api_key", "api_key_ip", "ip" (untrusted unless behind trusted LB)
+	Enabled           bool    `yaml:"enabled"`
+	RequestsPerSecond float64 `yaml:"requests_per_second"`
+	Burst             int     `yaml:"burst"`
+	KeyStrategy       string  `yaml:"key_strategy"` // "api_key", "api_key_ip", "ip" (untrusted unless behind trusted LB)
 }
 
 // AuthConfig configures auth for a route.
 type AuthConfig struct {
 	Enabled      bool   `yaml:"enabled"`
-	Mode         string `yaml:"mode"` // "jwt" or "api_key"
-	JWTSecretEnv string `yaml:"jwt_secret_env"`
-	APIKeysEnv   string `yaml:"api_keys_env"` // env var holding comma-separated valid keys
+	Mode         string `yaml:"mode"`           // "jwt" or "api_key"
+	JWTSecretEnv string `yaml:"jwt_secret_env"` // env var holding an HMAC secret
+	// JWTPublicKeyEnv names an env var holding a PEM public key or
+	// certificate (RS*/PS*/ES*/EdDSA). Exactly one of JWTSecretEnv and
+	// JWTPublicKeyEnv must be set for jwt mode.
+	JWTPublicKeyEnv string `yaml:"jwt_public_key_env"`
+	// Issuer and Audience, if set, must match the token's iss / aud claims.
+	Issuer   string `yaml:"issuer"`
+	Audience string `yaml:"audience"`
+	// Leeway tolerates issuer/gateway clock skew on exp/nbf/iat.
+	Leeway time.Duration `yaml:"leeway"`
+	// JWTCookie names a cookie the JWT is read from when the request has no
+	// Authorization header (browser sessions). Cookie-authenticated
+	// state-changing requests must pass a cross-origin (CSRF) check.
+	JWTCookie  string `yaml:"jwt_cookie"`
+	APIKeysEnv string `yaml:"api_keys_env"` // env var holding comma-separated valid keys
 }
 
 // SigningConfig configures HMAC request signing verification for a route.
@@ -88,11 +126,15 @@ type SigningConfig struct {
 // to it. This is intentionally data-driven, per AGENTS.md, rather than a
 // hardcoded if-chain in main.go.
 type Route struct {
-	PathPrefix string          `yaml:"path_prefix"`
-	Upstream   string          `yaml:"upstream"`
-	Auth       AuthConfig      `yaml:"auth"`
-	RateLimit  RateLimitConfig `yaml:"rate_limit"`
-	Signing    SigningConfig   `yaml:"signing"`
+	PathPrefix string `yaml:"path_prefix"`
+	// StripPrefix removes PathPrefix from the path before forwarding, so
+	// "/api/users/42" reaches the upstream as "/42".
+	StripPrefix bool            `yaml:"strip_prefix"`
+	Upstream    string          `yaml:"upstream"`
+	Auth        AuthConfig      `yaml:"auth"`
+	RateLimit   RateLimitConfig `yaml:"rate_limit"`
+	Signing     SigningConfig   `yaml:"signing"`
+	CORS        CORSConfig      `yaml:"cors"`
 }
 
 // Load reads and parses the YAML config at path, applies environment
@@ -100,18 +142,37 @@ type Route struct {
 // exactly what's wrong if validation fails. Callers should treat any error
 // as fatal (fail fast on invalid config).
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the path is operator-supplied config (GATEWAY_CONFIG), not request input.
 	if err != nil {
 		return nil, fmt.Errorf("config: reading %s: %w", path, err)
 	}
 
 	cfg := Default()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	// Leave addr unset so its default can follow the TLS mode below.
+	cfg.Server.Addr = ""
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	// Unknown keys (typos, removed options) are an error, not silently
+	// ignored: a misspelled timeout must not quietly fall back to a default.
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("config: parsing %s: %w", path, err)
+	}
+
+	if cfg.Server.Addr == "" {
+		cfg.Server.Addr = ":8080"
+		if cfg.TLS.Enabled() {
+			cfg.Server.Addr = ":443"
+		}
+	}
+	if cfg.Valkey != nil {
+		cfg.Valkey.applyDefaults()
 	}
 
 	if addr := os.Getenv("GATEWAY_ADDR"); addr != "" {
 		cfg.Server.Addr = addr
+	}
+	if addr := os.Getenv("GATEWAY_ADMIN_ADDR"); addr != "" {
+		cfg.Server.AdminAddr = addr
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -124,6 +185,7 @@ func Load(path string) (*Config, error) {
 // from YAML override these field by field.
 func Default() *Config {
 	return &Config{
+		TLS: TLSConfig{Mode: TLSModeOff, HTTPAddr: ":80"},
 		Server: ServerConfig{
 			Addr:              ":8080",
 			ReadTimeout:       5 * time.Second,
@@ -131,6 +193,10 @@ func Default() *Config {
 			IdleTimeout:       120 * time.Second,
 			ReadHeaderTimeout: 5 * time.Second,
 			ShutdownTimeout:   30 * time.Second,
+			AdminAddr:         "127.0.0.1:9090",
+			RequestTimeout:    9 * time.Second,
+			UpgradeTimeout:    time.Hour,
+			MaxBodyBytes:      10 << 20,
 		},
 	}
 }
@@ -152,6 +218,29 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.ShutdownTimeout <= 0 {
 		errs = append(errs, "server.shutdown_timeout must be > 0")
+	}
+	switch {
+	case c.Server.AdminAddr == "":
+		errs = append(errs, "server.admin_addr must not be empty (health, readiness and metrics are served there)")
+	case c.Server.AdminAddr == c.Server.Addr:
+		errs = append(errs, "server.admin_addr must differ from server.addr: admin endpoints must not share the public listener")
+	case c.TLS.Enabled() && c.Server.AdminAddr == c.TLS.HTTPAddr:
+		errs = append(errs, "server.admin_addr must differ from tls.http_addr")
+	}
+	if c.Server.RequestTimeout <= 0 {
+		errs = append(errs, "server.request_timeout must be > 0")
+	} else if c.Server.WriteTimeout > 0 && c.Server.RequestTimeout >= c.Server.WriteTimeout {
+		errs = append(errs, fmt.Sprintf("server.request_timeout (%v) must be < server.write_timeout (%v), or clients get a reset connection instead of a 504",
+			c.Server.RequestTimeout, c.Server.WriteTimeout))
+	}
+	if c.Server.UpgradeTimeout <= 0 {
+		errs = append(errs, "server.upgrade_timeout must be > 0")
+	}
+	if c.Server.MaxBodyBytes < 0 {
+		errs = append(errs, "server.max_body_bytes must be >= 0 (0 disables the limit)")
+	}
+	if _, err := ParseTrustedProxies(c.Server.TrustedProxies); err != nil {
+		errs = append(errs, err.Error())
 	}
 
 	if len(c.Upstreams) == 0 {
@@ -175,6 +264,9 @@ func (c *Config) Validate() error {
 		}
 		if u.RequestTimeout <= 0 {
 			errs = append(errs, fmt.Sprintf("upstreams[%d].request_timeout must be > 0", i))
+		} else if c.Server.RequestTimeout > 0 && u.RequestTimeout > c.Server.RequestTimeout {
+			errs = append(errs, fmt.Sprintf("upstreams[%d].request_timeout (%v) must be <= server.request_timeout (%v), or it can never take effect",
+				i, u.RequestTimeout, c.Server.RequestTimeout))
 		}
 		if u.CircuitBreaker.Enabled && u.CircuitBreaker.FailureThreshold <= 0 {
 			errs = append(errs, fmt.Sprintf("upstreams[%d].circuit_breaker.failure_threshold must be > 0 when enabled", i))
@@ -190,6 +282,8 @@ func (c *Config) Validate() error {
 	for i, r := range c.Routes {
 		if r.PathPrefix == "" {
 			errs = append(errs, fmt.Sprintf("routes[%d].path_prefix must not be empty", i))
+		} else if !strings.HasPrefix(r.PathPrefix, "/") {
+			errs = append(errs, fmt.Sprintf("routes[%d].path_prefix must start with \"/\", got %q", i, r.PathPrefix))
 		}
 		if r.Upstream == "" {
 			errs = append(errs, fmt.Sprintf("routes[%d].upstream must not be empty", i))
@@ -199,10 +293,16 @@ func (c *Config) Validate() error {
 		if r.Auth.Enabled {
 			switch r.Auth.Mode {
 			case "jwt":
-				if r.Auth.JWTSecretEnv == "" {
-					errs = append(errs, fmt.Sprintf("routes[%d].auth.jwt_secret_env must be set for jwt mode", i))
-				} else if os.Getenv(r.Auth.JWTSecretEnv) == "" {
+				switch {
+				case (r.Auth.JWTSecretEnv == "") == (r.Auth.JWTPublicKeyEnv == ""):
+					errs = append(errs, fmt.Sprintf("routes[%d].auth: exactly one of jwt_secret_env or jwt_public_key_env must be set for jwt mode", i))
+				case r.Auth.JWTSecretEnv != "" && os.Getenv(r.Auth.JWTSecretEnv) == "":
 					errs = append(errs, fmt.Sprintf("routes[%d].auth: env var %q referenced by jwt_secret_env is not set", i, r.Auth.JWTSecretEnv))
+				case r.Auth.JWTPublicKeyEnv != "" && os.Getenv(r.Auth.JWTPublicKeyEnv) == "":
+					errs = append(errs, fmt.Sprintf("routes[%d].auth: env var %q referenced by jwt_public_key_env is not set", i, r.Auth.JWTPublicKeyEnv))
+				}
+				if r.Auth.Leeway < 0 {
+					errs = append(errs, fmt.Sprintf("routes[%d].auth.leeway must be >= 0", i))
 				}
 			case "api_key":
 				if r.Auth.APIKeysEnv == "" {
@@ -227,6 +327,17 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Sprintf("routes[%d].rate_limit.key_strategy must be one of api_key, api_key_ip, ip, got %q", i, r.RateLimit.KeyStrategy))
 			}
 		}
+		errs = append(errs, r.CORS.validate(i)...)
+		if r.Auth.JWTCookie != "" {
+			switch {
+			case !r.Auth.Enabled || r.Auth.Mode != "jwt":
+				errs = append(errs, fmt.Sprintf("routes[%d].auth.jwt_cookie requires auth.enabled with mode jwt", i))
+			case r.CORS.Enabled && slices.Contains(r.CORS.AllowedOrigins, "*"):
+				errs = append(errs, fmt.Sprintf("routes[%d]: auth.jwt_cookie cannot be used with cors.allowed_origins \"*\"; list the frontend's exact origin", i))
+			case r.CORS.Enabled && !r.CORS.AllowCredentials:
+				errs = append(errs, fmt.Sprintf("routes[%d]: auth.jwt_cookie with cors needs cors.allow_credentials: true, or browsers won't send the cookie cross-origin", i))
+			}
+		}
 		if r.Signing.Enabled {
 			if r.Signing.SecretEnv == "" {
 				errs = append(errs, fmt.Sprintf("routes[%d].signing.secret_env must be set", i))
@@ -239,8 +350,32 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.Valkey != nil {
+		errs = append(errs, c.Valkey.validate()...)
+	}
+	errs = append(errs, c.TLS.validate(c.Server.Addr)...)
+
 	if len(errs) > 0 {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// ParseTrustedProxies parses server.trusted_proxies entries, each a CIDR
+// ("10.0.0.0/8") or a bare IP (treated as a single-address prefix).
+func ParseTrustedProxies(entries []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(entries))
+	for i, e := range entries {
+		if p, err := netip.ParsePrefix(e); err == nil {
+			prefixes = append(prefixes, p.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(e)
+		if err != nil {
+			return nil, fmt.Errorf("server.trusted_proxies[%d] %q is not a valid CIDR or IP", i, e)
+		}
+		addr = addr.Unmap()
+		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return prefixes, nil
 }

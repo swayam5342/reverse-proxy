@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/swayam5342/jgateway/internal/config"
+	"github.com/swayam5342/jgateway/internal/middleware/metrics"
 	"github.com/swayam5342/jgateway/internal/proxy"
 )
 
@@ -46,7 +48,10 @@ func TestIntegration_AuthRejectsBadToken(t *testing.T) {
 			JWTSecretEnv: "JWT_SECRET",
 		},
 	}
-	handler := buildRouteHandler(testLogger(), routeCfg, config.Upstream{Name: "backend"}, up)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteHandler: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/thing", nil)
 	rec := httptest.NewRecorder()
@@ -60,7 +65,7 @@ func TestIntegration_AuthRejectsBadToken(t *testing.T) {
 	}
 
 	// A validly signed token should pass through to the upstream.
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{Subject: "user-1"})
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{Subject: "user-1", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
 	signed, err := token.SignedString([]byte(secret))
 	if err != nil {
 		t.Fatalf("signing token: %v", err)
@@ -102,7 +107,10 @@ func TestIntegration_RateLimiterReturns429AfterN(t *testing.T) {
 			KeyStrategy:       "ip",
 		},
 	}
-	handler := buildRouteHandler(testLogger(), routeCfg, config.Upstream{Name: "backend"}, up)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteHandler: %v", err)
+	}
 
 	newReq := func() *http.Request {
 		r := httptest.NewRequest(http.MethodGet, "/api/thing", nil)
@@ -148,7 +156,10 @@ func TestIntegration_CircuitBreakerOpensAfterFailures(t *testing.T) {
 		},
 	}
 	routeCfg := config.Route{PathPrefix: "/api", Upstream: "backend"}
-	handler := buildRouteHandler(testLogger(), routeCfg, upCfg, up)
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, upCfg, up, nil, newBreaker(upCfg))
+	if err != nil {
+		t.Fatalf("buildRouteHandler: %v", err)
+	}
 
 	for i := range 2 {
 		rec := httptest.NewRecorder()
@@ -162,5 +173,32 @@ func TestIntegration_CircuitBreakerOpensAfterFailures(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/thing", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 once breaker trips, got %d", rec.Code)
+	}
+}
+
+// The rate-limit rejection metric is recorded (it used to be registered
+// but never incremented).
+func TestIntegration_RateLimitRejectionMetricRecorded(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer backend.Close()
+	up, err := proxy.NewUpstream("backend", backend.URL, time.Second, time.Second)
+	if err != nil {
+		t.Fatalf("NewUpstream: %v", err)
+	}
+	routeCfg := config.Route{
+		PathPrefix: "/metric-test",
+		Upstream:   "backend",
+		RateLimit:  config.RateLimitConfig{Enabled: true, RequestsPerSecond: 0.001, Burst: 1, KeyStrategy: "ip"},
+	}
+	handler, err := buildRouteHandler(testLogger(), config.Default().Server, routeCfg, config.Upstream{Name: "backend"}, up, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteHandler: %v", err)
+	}
+	before := testutil.ToFloat64(metrics.RateLimitRejections.WithLabelValues("/metric-test"))
+	for range 3 {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metric-test/x", nil))
+	}
+	if got := testutil.ToFloat64(metrics.RateLimitRejections.WithLabelValues("/metric-test")) - before; got != 2 {
+		t.Errorf("rejections recorded = %v, want 2", got)
 	}
 }

@@ -13,7 +13,7 @@ import (
 func okHandlerEchoingBody() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		w.Write(body)
+		_, _ = w.Write(body)
 	})
 }
 
@@ -90,5 +90,21 @@ func TestSigning_WrongSecretRejected(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for wrong secret, got %d", rec.Code)
+	}
+}
+
+// When the body-limit middleware's cap trips while signing buffers the body,
+// the client must get 413, not a generic 400.
+func TestSigning_OversizedBodyReturns413(t *testing.T) {
+	secret := []byte("shared-secret")
+	body := bytes.Repeat([]byte("x"), 100)
+	req := signedRequest(t, secret, http.MethodPost, "/api/thing", body, time.Now())
+	rec := httptest.NewRecorder()
+	req.Body = http.MaxBytesReader(rec, req.Body, 10)
+
+	New(Config{Secret: secret})(okHandlerEchoingBody()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", rec.Code)
 	}
 }
