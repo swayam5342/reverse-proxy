@@ -112,11 +112,14 @@ type SigningConfig struct {
 // to it. This is intentionally data-driven, per AGENTS.md, rather than a
 // hardcoded if-chain in main.go.
 type Route struct {
-	PathPrefix string          `yaml:"path_prefix"`
-	Upstream   string          `yaml:"upstream"`
-	Auth       AuthConfig      `yaml:"auth"`
-	RateLimit  RateLimitConfig `yaml:"rate_limit"`
-	Signing    SigningConfig   `yaml:"signing"`
+	PathPrefix string `yaml:"path_prefix"`
+	// StripPrefix removes PathPrefix from the path before forwarding, so
+	// "/api/users/42" reaches the upstream as "/42".
+	StripPrefix bool            `yaml:"strip_prefix"`
+	Upstream    string          `yaml:"upstream"`
+	Auth        AuthConfig      `yaml:"auth"`
+	RateLimit   RateLimitConfig `yaml:"rate_limit"`
+	Signing     SigningConfig   `yaml:"signing"`
 }
 
 // Load reads and parses the YAML config at path, applies environment
@@ -239,6 +242,8 @@ func (c *Config) Validate() error {
 	for i, r := range c.Routes {
 		if r.PathPrefix == "" {
 			errs = append(errs, fmt.Sprintf("routes[%d].path_prefix must not be empty", i))
+		} else if !strings.HasPrefix(r.PathPrefix, "/") {
+			errs = append(errs, fmt.Sprintf("routes[%d].path_prefix must start with \"/\", got %q", i, r.PathPrefix))
 		}
 		if r.Upstream == "" {
 			errs = append(errs, fmt.Sprintf("routes[%d].upstream must not be empty", i))

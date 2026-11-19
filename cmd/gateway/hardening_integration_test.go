@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -304,5 +305,36 @@ func TestGateway_JWTIssuerAndAudienceEnforced(t *testing.T) {
 	}
 	if s := call("https://issuer.example", "other"); s != http.StatusUnauthorized {
 		t.Errorf("wrong audience = %d, want 401", s)
+	}
+}
+
+// strip_prefix and gateway-owned forwarded headers, end to end.
+func TestGateway_StripPrefixAndForwardedHeaders(t *testing.T) {
+	var gotURI, gotXFF, gotXFH string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI, gotXFF, gotXFH = r.RequestURI, r.Header.Get("X-Forwarded-For"), r.Header.Get("X-Forwarded-Host")
+	}))
+	defer backend.Close()
+
+	cfg := gatewayConfig(backend.URL)
+	cfg.Routes[0].StripPrefix = true
+	gw := startGateway(t, cfg)
+
+	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/api/items/7", nil)
+	req.Header.Set("X-Forwarded-For", "6.6.6.6")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if gotURI != "/items/7" {
+		t.Errorf("upstream RequestURI = %q, want /items/7", gotURI)
+	}
+	if gotXFF == "6.6.6.6" || !strings.HasPrefix(gotXFF, "127.0.0.1") && gotXFF != "::1" {
+		t.Errorf("upstream X-Forwarded-For = %q, want the real peer, not the spoofed value", gotXFF)
+	}
+	if gotXFH != strings.TrimPrefix(gw.URL, "http://") {
+		t.Errorf("upstream X-Forwarded-Host = %q, want %q", gotXFH, strings.TrimPrefix(gw.URL, "http://"))
 	}
 }

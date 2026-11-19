@@ -1,4 +1,4 @@
-package ratelimit
+package httpx
 
 import (
 	"net/http/httptest"

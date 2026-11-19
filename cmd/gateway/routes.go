@@ -27,7 +27,16 @@ import (
 // payload before it's retried/forwarded, and the circuit breaker sits
 // innermost so it trips on real upstream failures only.
 func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg config.Route, upCfg config.Upstream, up *proxy.Upstream) (http.Handler, error) {
-	reverseProxy := proxy.NewReverseProxy(up)
+	// Validated by config.Validate, so this can't fail here.
+	trusted, err := config.ParseTrustedProxies(srv.TrustedProxies)
+	if err != nil {
+		return nil, err
+	}
+	proxyOpts := proxy.Options{TrustedProxies: trusted}
+	if routeCfg.StripPrefix {
+		proxyOpts.StripPrefix = routeCfg.PathPrefix
+	}
+	reverseProxy := proxy.NewReverseProxy(up, proxyOpts)
 
 	var mws []pkgmw.Middleware
 	mws = append(mws, logging.New(logger, routeCfg.PathPrefix))
@@ -58,11 +67,6 @@ func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg co
 	}
 
 	if routeCfg.RateLimit.Enabled {
-		// Validated by config.Validate, so this can't fail here.
-		trusted, err := config.ParseTrustedProxies(srv.TrustedProxies)
-		if err != nil {
-			return nil, err
-		}
 		mws = append(mws, ratelimit.New(ratelimit.Config{
 			RequestsPerSecond: routeCfg.RateLimit.RequestsPerSecond,
 			Burst:             routeCfg.RateLimit.Burst,

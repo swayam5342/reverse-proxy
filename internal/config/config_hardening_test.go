@@ -38,6 +38,7 @@ func TestValidate_Hardening(t *testing.T) {
 		wantErr string // "" = valid
 	}{
 		{"defaults valid", func(*Config) {}, ""},
+		{"path_prefix must start with a slash", func(c *Config) { c.Routes[0].PathPrefix = "api" }, "routes[0].path_prefix must start with \"/\""},
 		{"request_timeout must be set", func(c *Config) { c.Server.RequestTimeout = 0 }, "server.request_timeout must be > 0"},
 		{
 			"request_timeout must leave room to write the 504",

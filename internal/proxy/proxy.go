@@ -12,9 +12,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
+
+	"github.com/swayam5342/jgateway/internal/httpx"
 )
 
 // ErrNoRouteMatch is returned (via 404 to the client) when no configured
@@ -51,19 +55,41 @@ func NewUpstream(name, rawURL string, dialTimeout, requestTimeout time.Duration)
 	}, nil
 }
 
-// NewReverseProxy builds an httputil.ReverseProxy targeting up. The director
-// rewrites scheme/host/path only — it never forwards hop-by-hop or
-// attacker-controlled trust headers (Host) verbatim into upstream-trusted
-// fields.
-func NewReverseProxy(up *Upstream) *httputil.ReverseProxy {
-	rp := &httputil.ReverseProxy{
+// Options configures how NewReverseProxy rewrites requests.
+type Options struct {
+	// StripPrefix, if set, is removed from the start of the request path
+	// before forwarding ("/api/users/42" → "/42"; empty becomes "/").
+	StripPrefix string
+	// TrustedProxies is used to resolve the client IP sent upstream in
+	// X-Forwarded-For (see httpx.ClientIP).
+	TrustedProxies []netip.Prefix
+}
+
+// NewReverseProxy builds an httputil.ReverseProxy targeting up.
+//
+// It uses ReverseProxy.Rewrite, which strips hop-by-hop headers and every
+// client-supplied Forwarded / X-Forwarded-* header before Rewrite runs. The
+// gateway then sets X-Forwarded-For (the resolved client IP),
+// X-Forwarded-Host (the original Host) and X-Forwarded-Proto itself, so a
+// backend can trust them. The outbound Host is the upstream's, and an
+// upstream URL path ("http://svc/v1") is prepended to the request path.
+func NewReverseProxy(up *Upstream, opts Options) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
 		Transport: up.Client.Transport,
-		Director: func(req *http.Request) {
-			req.URL.Scheme = up.Target.Scheme
-			req.URL.Host = up.Target.Host
-			req.Host = up.Target.Host
-			if _, ok := req.Header["User-Agent"]; !ok {
-				req.Header.Set("User-Agent", "")
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			stripPrefix(pr.Out.URL, opts.StripPrefix)
+			pr.SetURL(up.Target)
+
+			proto := "http"
+			if pr.In.TLS != nil {
+				proto = "https"
+			}
+			pr.Out.Header.Set("X-Forwarded-For", httpx.ClientIP(pr.In, opts.TrustedProxies))
+			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
+			pr.Out.Header.Set("X-Forwarded-Proto", proto)
+
+			if _, ok := pr.Out.Header["User-Agent"]; !ok {
+				pr.Out.Header.Set("User-Agent", "")
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -74,7 +100,38 @@ func NewReverseProxy(up *Upstream) *httputil.ReverseProxy {
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
-	return rp
+}
+
+// stripPrefix removes prefix from u's path, keeping any percent-encoding in
+// RawPath intact.
+func stripPrefix(u *url.URL, prefix string) {
+	if prefix == "" || prefix == "/" {
+		return
+	}
+	trim := func(p string) string {
+		p = strings.TrimPrefix(p, prefix)
+		if !strings.HasPrefix(p, "/") {
+			p = "/" + p
+		}
+		return p
+	}
+	u.Path = trim(u.Path)
+	if u.RawPath != "" {
+		u.RawPath = trim(u.RawPath)
+	}
+}
+
+// matchPrefix reports whether path falls under prefix on a path-segment
+// boundary: "/api/users" matches "/api/users" and "/api/users/42" but not
+// "/api/users-admin". A prefix ending in "/" matches anything below it.
+func matchPrefix(path, prefix string) bool {
+	if path == prefix {
+		return true
+	}
+	if strings.HasSuffix(prefix, "/") {
+		return strings.HasPrefix(path, prefix)
+	}
+	return strings.HasPrefix(path, prefix+"/")
 }
 
 // Route maps a path prefix to a fully-built handler (the middleware chain
@@ -106,7 +163,7 @@ func NewRouter(routes []Route) *Router {
 // route prefix or responding 404 if none match.
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, route := range rt.routes {
-		if len(r.URL.Path) >= len(route.PathPrefix) && r.URL.Path[:len(route.PathPrefix)] == route.PathPrefix {
+		if matchPrefix(r.URL.Path, route.PathPrefix) {
 			route.Handler.ServeHTTP(w, r)
 			return
 		}
