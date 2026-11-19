@@ -138,3 +138,40 @@ func TestLoad_ExampleConfig(t *testing.T) {
 		t.Errorf("unexpected server config: %+v", cfg.Server)
 	}
 }
+
+func TestValidate_AdminAddr(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Server.AdminAddr = cfg.Server.Addr
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "server.admin_addr") {
+		t.Errorf("error = %v, want one about server.admin_addr equal to server.addr", err)
+	}
+	cfg.Server.AdminAddr = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "server.admin_addr") {
+		t.Errorf("error = %v, want one about empty server.admin_addr", err)
+	}
+}
+
+// Containers need the admin listener reachable by probes/Prometheus
+// without editing the baked-in config.
+func TestLoad_AdminAddrEnvOverride(t *testing.T) {
+	t.Setenv("GATEWAY_ADMIN_ADDR", ":9191")
+	cfg, err := Load(writeConfig(t, `
+upstreams:
+  - name: backend
+    url: "http://localhost:9000"
+    dial_timeout: 2s
+    request_timeout: 5s
+routes:
+  - path_prefix: "/api"
+    upstream: backend
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.AdminAddr != ":9191" {
+		t.Errorf("admin_addr = %q, want :9191 from GATEWAY_ADMIN_ADDR", cfg.Server.AdminAddr)
+	}
+	if Default().Server.AdminAddr != "127.0.0.1:9090" {
+		t.Errorf("default admin_addr = %q, want 127.0.0.1:9090", Default().Server.AdminAddr)
+	}
+}

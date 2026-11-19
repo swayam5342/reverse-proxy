@@ -51,6 +51,14 @@ func withRetryAndBreaker(cfg *config.Config) *config.Config {
 // read/write timeouts) on a local listener.
 func startGateway(t *testing.T, cfg *config.Config) *httptest.Server {
 	t.Helper()
+	public, _ := startGatewayWithAdmin(t, cfg)
+	return public
+}
+
+// startGatewayWithAdmin also starts the admin listener (health, readiness,
+// metrics) and returns both.
+func startGatewayWithAdmin(t *testing.T, cfg *config.Config) (public, admin *httptest.Server) {
+	t.Helper()
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("test config invalid: %v", err)
 	}
@@ -59,19 +67,21 @@ func startGateway(t *testing.T, cfg *config.Config) *httptest.Server {
 		t.Fatalf("newServers: %v", err)
 	}
 	t.Cleanup(s.Close)
-	srv := s.Public
-	ts := httptest.NewUnstartedServer(srv.Handler)
-	ts.Config = srv
-	ts.Start()
-	t.Cleanup(ts.Close)
-	return ts
+	start := func(srv *http.Server) *httptest.Server {
+		ts := httptest.NewUnstartedServer(srv.Handler)
+		ts.Config = srv
+		ts.Start()
+		t.Cleanup(ts.Close)
+		return ts
+	}
+	return start(s.Public), start(s.Admin)
 }
 
 // Fix 1: one dead upstream must not make the gateway unready.
 func TestGateway_ReadyWhileUpstreamDown(t *testing.T) {
-	gw := startGateway(t, gatewayConfig("http://127.0.0.1:1")) // nothing listens on port 1
+	_, admin := startGatewayWithAdmin(t, gatewayConfig("http://127.0.0.1:1")) // nothing listens on port 1
 
-	resp, err := http.Get(gw.URL + "/readyz")
+	resp, err := http.Get(admin.URL + "/readyz")
 	if err != nil {
 		t.Fatalf("GET /readyz: %v", err)
 	}

@@ -38,6 +38,11 @@ type ServerConfig struct {
 	IdleTimeout       time.Duration `yaml:"idle_timeout"`
 	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
 	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
+	// AdminAddr serves /healthz, /readyz and /metrics, which never appear on
+	// the public listener. Default 127.0.0.1:9090; use ":9090" in containers
+	// (GATEWAY_ADMIN_ADDR) so probes and Prometheus can reach it, and never
+	// publish it.
+	AdminAddr string `yaml:"admin_addr"`
 
 	// RequestTimeout is the overall deadline for one request through the
 	// whole chain, retries and backoff included. Must be shorter than
@@ -166,6 +171,9 @@ func Load(path string) (*Config, error) {
 	if addr := os.Getenv("GATEWAY_ADDR"); addr != "" {
 		cfg.Server.Addr = addr
 	}
+	if addr := os.Getenv("GATEWAY_ADMIN_ADDR"); addr != "" {
+		cfg.Server.AdminAddr = addr
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config: invalid: %w", err)
@@ -185,6 +193,7 @@ func Default() *Config {
 			IdleTimeout:       120 * time.Second,
 			ReadHeaderTimeout: 5 * time.Second,
 			ShutdownTimeout:   30 * time.Second,
+			AdminAddr:         "127.0.0.1:9090",
 			RequestTimeout:    9 * time.Second,
 			UpgradeTimeout:    time.Hour,
 			MaxBodyBytes:      10 << 20,
@@ -209,6 +218,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.ShutdownTimeout <= 0 {
 		errs = append(errs, "server.shutdown_timeout must be > 0")
+	}
+	switch {
+	case c.Server.AdminAddr == "":
+		errs = append(errs, "server.admin_addr must not be empty (health, readiness and metrics are served there)")
+	case c.Server.AdminAddr == c.Server.Addr:
+		errs = append(errs, "server.admin_addr must differ from server.addr: admin endpoints must not share the public listener")
+	case c.TLS.Enabled() && c.Server.AdminAddr == c.TLS.HTTPAddr:
+		errs = append(errs, "server.admin_addr must differ from tls.http_addr")
 	}
 	if c.Server.RequestTimeout <= 0 {
 		errs = append(errs, "server.request_timeout must be > 0")

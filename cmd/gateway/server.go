@@ -29,13 +29,14 @@ import (
 
 // servers are the gateway's listeners, built but not started.
 type servers struct {
-	// Public serves the proxied routes (and, until the admin listener
-	// exists, health and metrics). With TLS on it must be started with
+	// Public serves only the proxied routes. With TLS on it must be started with
 	// ListenAndServeTLS("", "") / ServeTLS(ln, "", "").
 	Public *http.Server
 	// HTTP is the plaintext listener (ACME HTTP-01 + redirect to HTTPS);
 	// nil when TLS is off.
 	HTTP *http.Server
+	// Admin serves /healthz, /readyz and /metrics on server.admin_addr.
+	Admin *http.Server
 	// TLS reports whether Public terminates TLS.
 	TLS bool
 	// Close releases resources held for the servers (the Valkey client).
@@ -107,10 +108,17 @@ func newServers(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 
 	router := proxy.NewRouter(routes)
 
+	// The admin listener alone serves health, readiness and metrics.
+	adminMux := http.NewServeMux()
+	adminMux.HandleFunc("/healthz", healthHandler.Liveness)
+	adminMux.HandleFunc("/readyz", healthHandler.Readiness)
+	adminMux.Handle("/metrics", metrics.Handler())
+
+	// The public listener serves only proxied routes. The ServeMux is kept
+	// for its path cleaning: "/api/x/../../admin" is redirected to
+	// "/admin" before routing, so a path can't match one route's prefix
+	// and then resolve to another path upstream.
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthHandler.Liveness)
-	mux.HandleFunc("/readyz", healthHandler.Readiness)
-	mux.Handle("/metrics", metrics.Handler())
 	// Gateway-wide middleware, outermost first: recovery catches panics
 	// from everything below; timeout puts the overall deadline on the
 	// context before anything else runs; bodylimit caps bodies before any
@@ -134,6 +142,14 @@ func newServers(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 			WriteTimeout:      cfg.Server.WriteTimeout,
 			IdleTimeout:       cfg.Server.IdleTimeout,
 			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		},
+		Admin: &http.Server{
+			Addr:              cfg.Server.AdminAddr,
+			Handler:           adminMux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       5 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		},
 		Close: func() {
 			for _, c := range closers {

@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,13 @@ import (
 )
 
 func main() {
+	check := flag.Bool("healthcheck", false, "GET -healthcheck-url and exit 0 if it returns 200, 1 otherwise (for container healthchecks)")
+	checkURL := flag.String("healthcheck-url", defaultHealthcheckURL, "URL probed by -healthcheck")
+	flag.Parse()
+	if *check {
+		os.Exit(healthcheck(*checkURL, defaultHealthcheckTimeout))
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
@@ -51,7 +59,7 @@ func run(cfg *config.Config, logger *slog.Logger) error {
 	listeners := []struct {
 		srv *http.Server
 		tls bool
-	}{{s.Public, s.TLS}}
+	}{{s.Public, s.TLS}, {s.Admin, false}}
 	if s.HTTP != nil {
 		listeners = append(listeners, struct {
 			srv *http.Server

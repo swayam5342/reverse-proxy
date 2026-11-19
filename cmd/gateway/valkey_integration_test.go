@@ -38,7 +38,7 @@ func TestGateway_ValkeyDownFallsBackToMemory(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer backend.Close()
 	cfg := rateLimitedConfig(backend.URL, &config.ValkeyConfig{Addr: "127.0.0.1:1", Timeout: 50 * time.Millisecond})
-	gw := startGateway(t, cfg)
+	gw, admin := startGatewayWithAdmin(t, cfg)
 
 	url := gw.URL + cfg.Routes[0].PathPrefix + "/x"
 	for i, want := range []int{200, 200, 429} {
@@ -47,7 +47,7 @@ func TestGateway_ValkeyDownFallsBackToMemory(t *testing.T) {
 		}
 	}
 
-	resp, err := http.Get(gw.URL + "/readyz")
+	resp, err := http.Get(admin.URL + "/readyz")
 	if err != nil {
 		t.Fatalf("GET /readyz: %v", err)
 	}
