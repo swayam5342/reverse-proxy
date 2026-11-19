@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/prometheus/client_golang v1.24.0
+	github.com/valkey-io/valkey-go v1.0.79
 	gopkg.in/yaml.v3 v3.0.1
 )
 
