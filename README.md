@@ -139,7 +139,6 @@ upstreams:
       max_attempts: 3
       base_backoff: 100ms
       max_backoff: 2s
-      idempotent_only: true
 
 routes:
   - path_prefix: "/api/users"

@@ -16,7 +16,6 @@ internal/
     logging/             structured request logging
     metrics/             Prometheus middleware and collectors
     recovery/            top-level panic recovery
-  discovery/             static config today; hook point for Consul/DNS
   health/                /healthz, /readyz handlers
 pkg/
   middleware/            the Middleware interface + chaining helper

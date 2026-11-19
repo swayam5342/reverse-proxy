@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,5 +127,48 @@ func TestValidate_ValidPasses(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+const strictBase = `
+server:
+  addr: ":9090"%s
+upstreams:
+  - name: backend
+    url: "http://localhost:9000"
+    dial_timeout: 2s
+    request_timeout: 5s%s
+routes:
+  - path_prefix: "/api"
+    upstream: backend
+`
+
+// Typos and removed keys must stop startup instead of being silently
+// ignored (yaml.v3 ignores unknown keys by default).
+func TestLoad_UnknownFieldFails(t *testing.T) {
+	tests := []struct {
+		name, server, upstream, wantErr string
+	}{
+		{"removed retry field", "", "\n    retry: {enabled: false, idempotent_only: true}", "idempotent_only"},
+		{"typo in server key", "\n  requst_timeout: 1s", "", "requst_timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, fmt.Sprintf(strictBase, tt.server, tt.upstream))
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected error mentioning %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoad_EmptyFileFailsValidation(t *testing.T) {
+	_, err := Load(writeConfig(t, ""))
+	if err == nil || !strings.Contains(err.Error(), "at least one upstream") {
+		t.Fatalf("error = %v, want a validation error mentioning \"at least one upstream\"", err)
 	}
 }

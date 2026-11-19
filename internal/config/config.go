@@ -5,7 +5,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -66,20 +69,18 @@ type CircuitBreakerConfig struct {
 
 // RetryConfig configures retry behavior for a route/upstream.
 type RetryConfig struct {
-	Enabled        bool          `yaml:"enabled"`
-	MaxAttempts    int           `yaml:"max_attempts"`
-	BaseBackoff    time.Duration `yaml:"base_backoff"`
-	MaxBackoff     time.Duration `yaml:"max_backoff"`
-	IdempotentOnly bool          `yaml:"idempotent_only"`
+	Enabled     bool          `yaml:"enabled"`
+	MaxAttempts int           `yaml:"max_attempts"`
+	BaseBackoff time.Duration `yaml:"base_backoff"`
+	MaxBackoff  time.Duration `yaml:"max_backoff"`
 }
 
 // RateLimitConfig configures the token bucket limiter for a route.
 type RateLimitConfig struct {
-	Enabled           bool          `yaml:"enabled"`
-	RequestsPerSecond float64       `yaml:"requests_per_second"`
-	Burst             int           `yaml:"burst"`
-	Window            time.Duration `yaml:"window"`
-	KeyStrategy       string        `yaml:"key_strategy"` // "api_key", "api_key_ip", "ip" (untrusted unless behind trusted LB)
+	Enabled           bool    `yaml:"enabled"`
+	RequestsPerSecond float64 `yaml:"requests_per_second"`
+	Burst             int     `yaml:"burst"`
+	KeyStrategy       string  `yaml:"key_strategy"` // "api_key", "api_key_ip", "ip" (untrusted unless behind trusted LB)
 }
 
 // AuthConfig configures auth for a route.
@@ -129,7 +130,11 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := Default()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	// Unknown keys (typos, removed options) are an error, not silently
+	// ignored: a misspelled timeout must not quietly fall back to a default.
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("config: parsing %s: %w", path, err)
 	}
 

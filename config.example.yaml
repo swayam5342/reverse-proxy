@@ -34,7 +34,6 @@ upstreams:
       max_attempts: 3
       base_backoff: 100ms
       max_backoff: 2s
-      idempotent_only: true
 
   - name: orders-api
     url: "http://orders-api.internal:8082"
