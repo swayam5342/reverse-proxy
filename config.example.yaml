@@ -19,6 +19,22 @@ server:
   trusted_proxies: []
   #  - 10.0.0.0/8
 
+# TLS termination. "off" serves plaintext (local dev, or TLS terminated in
+# front of the gateway). In production use "acme" (automatic Let's Encrypt)
+# or "files" (your own certificate, reloaded when renewed). With TLS on,
+# server.addr defaults to ":443" and http_addr serves ACME challenges and
+# redirects to HTTPS. See deploy/config.prod.yaml for a full example.
+tls:
+  mode: "off"
+  # http_addr: ":80"
+  # acme:
+  #   domains: ["api.example.com"]
+  #   email: "ops@example.com"
+  #   cache_dir: "/var/lib/jgateway/acme"
+  # files:
+  #   cert_file: /etc/jgateway/tls/fullchain.pem
+  #   key_file: /etc/jgateway/tls/privkey.pem
+
 # Shared rate-limit store. With it, every gateway copy shares one set of
 # limits; while Valkey is unreachable each copy falls back to in-memory
 # limits and switches back automatically. Omit to use in-memory limits only.

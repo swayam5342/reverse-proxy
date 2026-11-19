@@ -23,13 +23,30 @@ import (
 	"github.com/swayam5342/jgateway/internal/middleware/sanitize"
 	"github.com/swayam5342/jgateway/internal/middleware/timeout"
 	"github.com/swayam5342/jgateway/internal/proxy"
+	"github.com/swayam5342/jgateway/internal/tlsx"
 	pkgmw "github.com/swayam5342/jgateway/pkg/middleware"
 )
 
-// newServer builds the fully wired *http.Server (routes, middleware chains,
-// health and metrics endpoints, timeouts) from a validated config, without
-// starting it.
-func newServer(cfg *config.Config, logger *slog.Logger) (*http.Server, error) {
+// servers are the gateway's listeners, built but not started.
+type servers struct {
+	// Public serves the proxied routes (and, until the admin listener
+	// exists, health and metrics). With TLS on it must be started with
+	// ListenAndServeTLS("", "") / ServeTLS(ln, "", "").
+	Public *http.Server
+	// HTTP is the plaintext listener (ACME HTTP-01 + redirect to HTTPS);
+	// nil when TLS is off.
+	HTTP *http.Server
+	// TLS reports whether Public terminates TLS.
+	TLS bool
+	// Close releases resources held for the servers (the Valkey client).
+	// Call it after shutting the servers down.
+	Close func()
+}
+
+// newServers builds every listener (routes, middleware chains, health and
+// metrics endpoints, TLS, timeouts) from a validated config, without
+// starting any of them.
+func newServers(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	upstreams := make(map[string]*proxy.Upstream, len(cfg.Upstreams))
 	upstreamCfgs := make(map[string]config.Upstream, len(cfg.Upstreams))
 	for _, u := range cfg.Upstreams {
@@ -109,18 +126,45 @@ func newServer(cfg *config.Config, logger *slog.Logger) (*http.Server, error) {
 		sanitize.New(),
 	))
 
-	srv := &http.Server{
-		Addr:              cfg.Server.Addr,
-		Handler:           mux,
-		ReadTimeout:       cfg.Server.ReadTimeout,
-		WriteTimeout:      cfg.Server.WriteTimeout,
-		IdleTimeout:       cfg.Server.IdleTimeout,
-		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+	s := &servers{
+		Public: &http.Server{
+			Addr:              cfg.Server.Addr,
+			Handler:           mux,
+			ReadTimeout:       cfg.Server.ReadTimeout,
+			WriteTimeout:      cfg.Server.WriteTimeout,
+			IdleTimeout:       cfg.Server.IdleTimeout,
+			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		},
+		Close: func() {
+			for _, c := range closers {
+				c()
+			}
+		},
 	}
-	for _, c := range closers {
-		srv.RegisterOnShutdown(c)
+
+	if cfg.TLS.Enabled() {
+		tlsCfg, httpHandler, err := tlsx.ServerTLS(cfg.TLS, func(err error) {
+			metrics.TLSCertReloadErrors.Inc()
+			logger.Error("tls certificate reload failed, still serving the previous certificate", "error", err)
+		})
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		s.TLS = true
+		s.Public.TLSConfig = tlsCfg
+		s.HTTP = &http.Server{
+			Addr:              cfg.TLS.HTTPAddr,
+			Handler:           httpHandler,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       5 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
+	} else {
+		logger.Warn("tls.mode is off: serving plaintext HTTP; terminate TLS in front of the gateway in production")
 	}
-	return srv, nil
+	return s, nil
 }
 
 // readinessCheck reports whether a TCP connection to the upstream can be

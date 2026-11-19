@@ -24,6 +24,8 @@ type Config struct {
 	Server    ServerConfig `yaml:"server"`
 	Upstreams []Upstream   `yaml:"upstreams"`
 	Routes    []Route      `yaml:"routes"`
+	// TLS configures TLS termination (default: off).
+	TLS TLSConfig `yaml:"tls"`
 	// Valkey, if set, makes rate limits shared across gateway copies.
 	Valkey *ValkeyConfig `yaml:"valkey"`
 }
@@ -141,6 +143,8 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := Default()
+	// Leave addr unset so its default can follow the TLS mode below.
+	cfg.Server.Addr = ""
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	// Unknown keys (typos, removed options) are an error, not silently
 	// ignored: a misspelled timeout must not quietly fall back to a default.
@@ -149,6 +153,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: parsing %s: %w", path, err)
 	}
 
+	if cfg.Server.Addr == "" {
+		cfg.Server.Addr = ":8080"
+		if cfg.TLS.Enabled() {
+			cfg.Server.Addr = ":443"
+		}
+	}
 	if cfg.Valkey != nil {
 		cfg.Valkey.applyDefaults()
 	}
@@ -167,6 +177,7 @@ func Load(path string) (*Config, error) {
 // from YAML override these field by field.
 func Default() *Config {
 	return &Config{
+		TLS: TLSConfig{Mode: TLSModeOff, HTTPAddr: ":80"},
 		Server: ServerConfig{
 			Addr:              ":8080",
 			ReadTimeout:       5 * time.Second,
@@ -325,6 +336,7 @@ func (c *Config) Validate() error {
 	if c.Valkey != nil {
 		errs = append(errs, c.Valkey.validate()...)
 	}
+	errs = append(errs, c.TLS.validate(c.Server.Addr)...)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))

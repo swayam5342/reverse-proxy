@@ -54,10 +54,12 @@ func startGateway(t *testing.T, cfg *config.Config) *httptest.Server {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("test config invalid: %v", err)
 	}
-	srv, err := newServer(cfg, testLogger())
+	s, err := newServers(cfg, testLogger())
 	if err != nil {
-		t.Fatalf("newServer: %v", err)
+		t.Fatalf("newServers: %v", err)
 	}
+	t.Cleanup(s.Close)
+	srv := s.Public
 	ts := httptest.NewUnstartedServer(srv.Handler)
 	ts.Config = srv
 	ts.Start()

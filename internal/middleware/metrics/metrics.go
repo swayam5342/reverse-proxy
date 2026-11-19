@@ -52,6 +52,13 @@ var (
 		Help: "Rate-limit decisions answered by the in-memory fallback because the shared store was unavailable.",
 	})
 
+	// TLSCertReloadErrors counts failed reloads of a renewed certificate
+	// file (the previous certificate keeps being served).
+	TLSCertReloadErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "gateway_tls_cert_reload_errors_total",
+		Help: "Failed reloads of renewed TLS certificate files; the previous certificate is still served.",
+	})
+
 	// RetryAttempts counts retry attempts (beyond the first try) issued per
 	// route.
 	RetryAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -61,7 +68,7 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(RequestsTotal, RequestDuration, CircuitBreakerState, RateLimitRejections, RetryAttempts, StoreFallbacks)
+	prometheus.MustRegister(RequestsTotal, RequestDuration, CircuitBreakerState, RateLimitRejections, RetryAttempts, StoreFallbacks, TLSCertReloadErrors)
 }
 
 // Handler returns the /metrics HTTP handler for the default Prometheus
