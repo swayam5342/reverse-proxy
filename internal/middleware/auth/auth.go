@@ -9,8 +9,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -127,8 +129,7 @@ func NewJWT(cfg JWTConfig) (middleware.Middleware, error) {
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), identityContextKey, Identity{Subject: subject, Method: "jwt"})
-			next.ServeHTTP(w, r.WithContext(ctx))
+			authenticated(w, r, next, Identity{Subject: subject, Method: "jwt"})
 		})
 	}, nil
 }
@@ -189,18 +190,50 @@ func parsePublicKeyPEM(data []byte) (any, error) {
 	return pub, nil
 }
 
+// APIKey is one accepted key and the name it authenticates as. The name is
+// what identifies the caller everywhere (context identity, X-Auth-Subject,
+// rate-limit key, logs); the key itself never leaves this middleware.
+type APIKey struct {
+	Name string
+	Key  string
+}
+
+// ParseAPIKeys parses a comma-separated list of "name:key" entries, as held
+// in the env var named by auth.api_keys_env. Whitespace is trimmed and
+// empty entries are skipped. An entry without a name ("key") is accepted
+// and named "key-" plus the first 8 hex digits of its SHA-256, so a bare
+// key still never appears as an identity. Keys of unnamed entries must not
+// contain ':'.
+func ParseAPIKeys(s string) []APIKey {
+	var keys []APIKey
+	for entry := range strings.SplitSeq(s, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		name, key, named := strings.Cut(entry, ":")
+		if !named {
+			sum := sha256.Sum256([]byte(entry))
+			name, key = "key-"+hex.EncodeToString(sum[:])[:8], entry
+		}
+		keys = append(keys, APIKey{Name: strings.TrimSpace(name), Key: strings.TrimSpace(key)})
+	}
+	return keys
+}
+
 // APIKeyConfig configures API-key verification.
 type APIKeyConfig struct {
-	// ValidKeys is the set of accepted keys, sourced from env/secrets.
-	ValidKeys []string
+	// Keys is the set of accepted keys, sourced from env/secrets.
+	Keys []APIKey
 	// HeaderName defaults to "X-API-Key" if empty.
 	HeaderName string
 }
 
 // NewAPIKey returns a middleware that verifies a request-supplied API key
-// against ValidKeys using a constant-time comparison, so response timing
-// can't be used to discover valid keys. Any missing or unrecognized key
-// results in 401.
+// against Keys using a constant-time comparison over every key, so response
+// timing can't be used to discover valid keys. Any missing or unrecognized
+// key results in 401. On success the caller is identified by the key's
+// name.
 func NewAPIKey(cfg APIKeyConfig) middleware.Middleware {
 	header := cfg.HeaderName
 	if header == "" {
@@ -214,19 +247,34 @@ func NewAPIKey(cfg APIKeyConfig) middleware.Middleware {
 				return
 			}
 
-			var matched bool
-			for _, valid := range cfg.ValidKeys {
-				if subtle.ConstantTimeCompare([]byte(supplied), []byte(valid)) == 1 {
-					matched = true
+			matched := -1
+			for i, k := range cfg.Keys {
+				if subtle.ConstantTimeCompare([]byte(supplied), []byte(k.Key)) == 1 {
+					matched = i
 				}
 			}
-			if !matched {
+			if matched < 0 {
 				http.Error(w, "invalid api key", http.StatusUnauthorized)
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), identityContextKey, Identity{Subject: supplied, Method: "api_key"})
-			next.ServeHTTP(w, r.WithContext(ctx))
+			authenticated(w, r, next, Identity{Subject: cfg.Keys[matched].Name, Method: "api_key"})
 		})
 	}
+}
+
+// Identity headers set on the request forwarded upstream after successful
+// authentication. Client-supplied copies are stripped on entry by the
+// sanitize middleware, so backends can trust them.
+const (
+	HeaderSubject = "X-Auth-Subject"
+	HeaderMethod  = "X-Auth-Method"
+)
+
+// authenticated attaches id to the request context and identity headers,
+// then calls next.
+func authenticated(w http.ResponseWriter, r *http.Request, next http.Handler, id Identity) {
+	r.Header.Set(HeaderSubject, id.Subject)
+	r.Header.Set(HeaderMethod, id.Method)
+	next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), identityContextKey, id)))
 }

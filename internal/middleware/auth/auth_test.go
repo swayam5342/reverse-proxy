@@ -77,7 +77,7 @@ func TestJWT_FailsClosed(t *testing.T) {
 }
 
 func TestAPIKey_ValidAndInvalid(t *testing.T) {
-	h := NewAPIKey(APIKeyConfig{ValidKeys: []string{"key-a", "key-b"}})(okHandler())
+	h := NewAPIKey(APIKeyConfig{Keys: ParseAPIKeys("key-a,key-b")})(okHandler())
 
 	t.Run("valid key", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -110,7 +110,7 @@ func TestAPIKey_ValidAndInvalid(t *testing.T) {
 }
 
 func TestAPIKey_CustomHeader(t *testing.T) {
-	h := NewAPIKey(APIKeyConfig{ValidKeys: []string{"key-a"}, HeaderName: "X-Custom-Key"})(okHandler())
+	h := NewAPIKey(APIKeyConfig{Keys: ParseAPIKeys("key-a"), HeaderName: "X-Custom-Key"})(okHandler())
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-Custom-Key", "key-a")
 	rec := httptest.NewRecorder()

@@ -117,7 +117,7 @@ Routes, upstreams and their middleware are data, not code. [`docs/configuration.
 | `GATEWAY_CONFIG` | `config.yaml` | Path to the YAML config. |
 | `GATEWAY_ADDR` | `:8080` | Listen address; overrides `server.addr`. |
 | `JWT_SECRET` | `change-me` | Secret for JWT routes (named by `auth.jwt_secret_env`). |
-| `ORDERS_API_KEYS` | `change-me-key-1,change-me-key-2` | API keys for an `api_key` route (named by `auth.api_keys_env`). |
+| `ORDERS_API_KEYS` | `billing-svc:change-me-key-1,reports:change-me-key-2` | `name:key` pairs for an `api_key` route (named by `auth.api_keys_env`). The name identifies the caller. |
 | `ORDERS_SIGNING_SECRET` | `change-me` | HMAC secret for a signed route. |
 
 <details>

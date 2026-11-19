@@ -14,6 +14,7 @@ import (
 	"github.com/swayam5342/jgateway/internal/middleware/bodylimit"
 	"github.com/swayam5342/jgateway/internal/middleware/metrics"
 	"github.com/swayam5342/jgateway/internal/middleware/recovery"
+	"github.com/swayam5342/jgateway/internal/middleware/sanitize"
 	"github.com/swayam5342/jgateway/internal/middleware/timeout"
 	"github.com/swayam5342/jgateway/internal/proxy"
 	pkgmw "github.com/swayam5342/jgateway/pkg/middleware"
@@ -61,7 +62,8 @@ func newServer(cfg *config.Config, logger *slog.Logger) (*http.Server, error) {
 	// Gateway-wide middleware, outermost first: recovery catches panics
 	// from everything below; timeout puts the overall deadline on the
 	// context before anything else runs; bodylimit caps bodies before any
-	// route middleware (signing, retry) buffers them.
+	// route middleware (signing, retry) buffers them; sanitize drops
+	// client-supplied X-Auth-* so only the gateway can set identity headers.
 	mux.Handle("/", pkgmw.Chain(router,
 		recovery.New(logger),
 		timeout.New(timeout.Config{
@@ -69,6 +71,7 @@ func newServer(cfg *config.Config, logger *slog.Logger) (*http.Server, error) {
 			UpgradeTimeout: cfg.Server.UpgradeTimeout,
 		}),
 		bodylimit.New(cfg.Server.MaxBodyBytes),
+		sanitize.New(),
 	))
 
 	return &http.Server{

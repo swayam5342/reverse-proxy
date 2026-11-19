@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/swayam5342/jgateway/internal/config"
@@ -61,8 +60,8 @@ func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg co
 			}
 			mws = append(mws, mw)
 		case "api_key":
-			keys := splitNonEmpty(os.Getenv(routeCfg.Auth.APIKeysEnv), ",")
-			mws = append(mws, auth.NewAPIKey(auth.APIKeyConfig{ValidKeys: keys}))
+			keys := auth.ParseAPIKeys(os.Getenv(routeCfg.Auth.APIKeysEnv))
+			mws = append(mws, auth.NewAPIKey(auth.APIKeyConfig{Keys: keys}))
 		}
 	}
 
@@ -102,17 +101,4 @@ func buildRouteHandler(logger *slog.Logger, srv config.ServerConfig, routeCfg co
 	}
 
 	return pkgmw.Chain(reverseProxy, mws...), nil
-}
-
-func splitNonEmpty(s, sep string) []string {
-	if s == "" {
-		return nil
-	}
-	var out []string
-	for part := range strings.SplitSeq(s, sep) {
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }

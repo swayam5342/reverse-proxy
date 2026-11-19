@@ -338,3 +338,25 @@ func TestGateway_StripPrefixAndForwardedHeaders(t *testing.T) {
 		t.Errorf("upstream X-Forwarded-Host = %q, want %q", gotXFH, strings.TrimPrefix(gw.URL, "http://"))
 	}
 }
+
+// A client must not be able to impersonate a user by sending the identity
+// headers backends trust, even on routes without auth.
+func TestGateway_ClientCannotForgeIdentity(t *testing.T) {
+	var gotSubject string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSubject = r.Header.Get("X-Auth-Subject")
+	}))
+	defer backend.Close()
+	gw := startGateway(t, gatewayConfig(backend.URL))
+
+	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/api/x", nil)
+	req.Header.Set("X-Auth-Subject", "admin")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_ = resp.Body.Close()
+	if gotSubject != "" {
+		t.Errorf("upstream saw forged X-Auth-Subject %q", gotSubject)
+	}
+}
